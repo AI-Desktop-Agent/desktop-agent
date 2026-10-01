@@ -1,0 +1,18 @@
+desktop-agent/
+│
+├── apps/
+│   └── agent/
+│       └── src/
+│           └── main.py
+│
+├── packages/
+│   ├── core/
+│   │   └── interfaces/
+│   │       └── wake_word_provider.py
+│   │
+│   └── audio/
+│       └── wakeword/
+│           ├── __init__.py
+│           └── openwakeword_detector.py
+│
+└── requirements.txt
