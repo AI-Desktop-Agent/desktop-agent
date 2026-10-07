@@ -38,7 +38,7 @@ class OpenWakeWordDetector(WakeWordProvider):
 
         self.model = Model(
             wakeword_models=["hey_jarvis"],
-            inference_framework="tflite"
+            inference_framework="onnx"
         )
 
         print("[WakeWord] Model loaded.")
