@@ -3,3 +3,7 @@ sounddevice
 numpy
 faster-whisper==1.2.1
 av<19
+langchain-core
+langchain-ollama
+langchain-huggingface
+pyttsx3

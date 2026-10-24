@@ -30,3 +30,5 @@ class LLMManager:
         if self.structured_llm is None:
             self.__set_llm("structured")
         return self.structured_llm
+    
+llm_manager = LLMManager()

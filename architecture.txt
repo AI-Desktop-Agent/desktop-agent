@@ -1,18 +1,57 @@
+
 desktop-agent/
 │
 ├── apps/
 │   └── agent/
 │       └── src/
-│           └── main.py
+│           └── main.py                  # Entry point
 │
 ├── packages/
-│   ├── core/
-│   │   └── interfaces/
-│   │       └── wake_word_provider.py
 │   │
-│   └── audio/
-│       └── wakeword/
-│           ├── __init__.py
-│           └── openwakeword_detector.py
+│   ├── agent_graph/                     # NEW
+│   │   ├── __init__.py
+│   │   ├── builder.py                   # Create and compile graph
+│   │   ├── state.py                     # Shared graph state
+│   │   ├── nodes/
+│   │   │   ├── __init__.py
+│   │   │   ├── agent.py                 # Call LLM
+│   │   │   └── tools.py                 # Execute requested tools
+│   │   └── edges/
+│   │       ├── __init__.py
+│   │       └── routing.py               # Tool or final response?
+│   │
+│   ├── core/
+│   │   ├── interfaces/
+│   │   │   ├── wake_word_provider.py
+│   │   │   └── speech_to_text_provider.py
+│   │   └── runtime/                     # NEW
+│   │       ├── __init__.py
+│   │       └── agent_runtime.py         # Connect STT and graph
+│   │
+│   ├── audio/                           # Existing
+│   │   ├── recording/
+│   │   └── wakeword/
+│   │
+│   ├── speech/                          # Existing
+│   │   └── faster_whisper_stt.py
+│   │
+│   ├── llm/                             # Existing
+│   │   ├── llm_provider.py
+│   │   ├── llm_manager.py
+│   │   ├── ollama_llm.py
+│   │   └── hugging_face_llm.py
+│   │
+│   ├── tools/                           # NEW, initially minimal
+│   │   ├── __init__.py
+│   │   └── registry.py
+│   │
+│   ├── memory/                          # Add when needed
+│   └── security/                        # Add before sensitive tools
 │
-└── requirements.txt
+├── tests/
+│   ├── test_graph.py                    # NEW
+│   └── test_graph_routing.py            # NEW
+│
+├── requirements.txt
+├── architecture.txt
+└── README.md

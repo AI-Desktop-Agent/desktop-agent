@@ -1,55 +1,21 @@
-
-import time
-
-from packages.audio.recording.microphone_recorder import MicrophoneRecorder
+from packages.core.runtime.agent_runtime import AgentRuntime
+from packages.agent_graph.builder import agent_graph
 from packages.speech.faster_whisper_stt import FasterWhisperSTT
-
+from packages.audio.recording.microphone_recorder import MicrophoneRecorder
+from packages.speech.tts.pyttsx3_tts import Pyttsx3TTS
 
 def main():
-    recorder = MicrophoneRecorder(
-        sample_rate=16000,
-        channels=1,
-        silence_threshold=0.01,
-        silence_duration=1.5,
-        max_duration=15.0,
+    stt = FasterWhisperSTT()
+    tts = Pyttsx3TTS(rate=175, volume=1.0)
+    recorder = MicrophoneRecorder()
+    
+    obj = AgentRuntime(
+        graph=agent_graph,
+        stt=stt,
+        recorder=recorder,
+        tts=tts
     )
-
-    stt = FasterWhisperSTT(
-        model_size="base.en",
-        device="cpu",
-        compute_type="int8",
-        beam_size=5,
-        initial_prompt=(
-            "Desktop Agent, Chrome, Python, Faster-Whisper, "
-            "speech recognition, openbrowser, search."
-        ),
-    )
-
-    print("[Agent] Initializing speech recognition...")
-    stt.initialize()
-    print("[Agent] Ready.")
-
-    try:
-        while True:
-            print("\n[Agent] Listening... Speak now.")
-            audio = recorder.record()
-
-            print("[Agent] Transcribing...")
-            text = stt.transcribe(audio)
-
-            if text:
-                print(f"\n[You]: {text}")
-            else:
-                print("[Agent] No speech recognized.")
-
-            time.sleep(0.3)
-
-    except KeyboardInterrupt:
-        print("\n[Agent] Stopped.")
-
-    finally:
-        stt.destroy()
-
+    obj.run()
 
 if __name__ == "__main__":
     main()
