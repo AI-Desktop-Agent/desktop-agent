@@ -14,3 +14,6 @@ class OllamaLLM(LLMProvider):
             self.initialize_client()
         response = self.client.invoke(prompt)  
         return response
+    
+    def bind_tools(self, tools):
+        return self.client.bind_tools(tools)

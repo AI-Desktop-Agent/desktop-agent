@@ -1,4 +1,4 @@
-from langgraph.graph import StateGraph, START, END
+from langgraph.graph import StateGraph, START
 from packages.agent_graph.nodes.response_node import response_node
 from packages.agent_graph.state import AgentState
 from packages.tools import TOOLS
@@ -18,6 +18,5 @@ builder.add_conditional_edges(
     tools_condition
 )
 builder.add_edge('tools', 'response_node')
-builder.add_edge('response_node', END)
 
 agent_graph = builder.compile()

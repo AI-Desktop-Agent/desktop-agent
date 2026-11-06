@@ -22,3 +22,8 @@ class HuggingFaceLLM(LLMProvider):
             self.initialize_client()
         response = self.client.invoke(prompt)  
         return response
+    
+    def bind_tools(self, tools):
+        if self.client is None:
+            self.initialize_client()
+        return self.client.bind_tools(tools)

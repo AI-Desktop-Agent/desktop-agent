@@ -53,7 +53,7 @@ class Pyttsx3TTS(TextToSpeechProvider):
         self.initialize()
         
         self.engine.say(text)
-        self.runAndWait()
+        self.engine.runAndWait()
         
     def destroy(self) -> None:
         if self.engine is not None:
