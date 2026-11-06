@@ -10,3 +10,4 @@ pyttsx3
 langchain-openai
 langgraph
 langchain-community
+pywin32
