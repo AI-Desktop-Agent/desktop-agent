@@ -16,4 +16,6 @@ class OllamaLLM(LLMProvider):
         return response
     
     def bind_tools(self, tools):
+        if self.client is None:
+            self.initialize_client()
         return self.client.bind_tools(tools)

@@ -1,4 +1,5 @@
 from packages.llm.hugging_face_llm import HuggingFaceLLM
+import os
 
 class LLMManager:
     def __init__(self):
@@ -8,11 +9,11 @@ class LLMManager:
         
     def __set_llm(self, model_type):
         if model_type == "chat":
-            self.chat_llm = HuggingFaceLLM(model_name="gpt-4", api_key="your_api_key")
+            self.chat_llm = HuggingFaceLLM(model_name="gpt-4", api_key=os.getenv("HUGGINGFACEHUB_API_TOKEN"))
         elif model_type == "embedding":
-            self.embedding_llm = HuggingFaceLLM(model_name="bert-base-uncased", api_key="your_api_key")
+            self.embedding_llm = HuggingFaceLLM(model_name="bert-base-uncased", api_key=os.getenv("HUGGINGFACEHUB_API_TOKEN"))
         elif model_type == "structured":
-            self.structured_llm = HuggingFaceLLM(model_name="t5-base", api_key="your_api_key")
+            self.structured_llm = HuggingFaceLLM(model_name="t5-base", api_key=os.getenv("HUGGINGFACEHUB_API_TOKEN"))
         else:
             raise ValueError(f"Unknown model type: {model_type}")
         
