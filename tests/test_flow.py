@@ -1,252 +1,169 @@
 
-import os
-import sys
-import traceback
+import asyncio
+import time
 
-from langchain_core.messages import HumanMessage, AIMessage
+from langchain_core.messages import AIMessage
 from langchain_core.tools import tool
+from langgraph.graph import StateGraph, START, END, MessagesState
+from langgraph.prebuilt import ToolNode
 
-from packages.llm.openrouter_llm import OpenRouterLLM
+from packages.agent_graph.builder import agent_graph
+from packages.tools.search.web_search import web_search
+from packages.core.runtime.agent_runtime import AgentRuntime
 from dotenv import load_dotenv
 
 load_dotenv()
 
-def run_test(name, test_function):
-    print(f"\n{'=' * 55}")
-    print(f"TEST: {name}")
-    print("=" * 55)
-
-    try:
-        test_function()
-        print(f"[PASS] {name}")
-        return True
-
-    except Exception as exc:
-        print(f"[FAIL] {name}")
-        print(f"Reason: {exc}")
-        traceback.print_exc()
-        return False
-
-
 # --------------------------------------------------
-# TEST 1: OpenRouter API connectivity
+# Test 1: Actual agent graph - async LLM response
 # --------------------------------------------------
 
-def test_openrouter_connection():
-    llm = OpenRouterLLM()
+async def test_async_agent_response():
+    print("\n[TEST 1] Async agent response")
 
-    response = llm.invoke([
-        HumanMessage(content="Reply with exactly: OpenRouter working")
-    ])
-
-    assert isinstance(response, AIMessage)
-    assert response.content
-
-    print("Response:", response.content)
-
-
-# --------------------------------------------------
-# TEST 2: OpenRouter tool binding
-# --------------------------------------------------
-
-@tool
-def test_calculator(value: int) -> int:
-    """Return the square of an integer."""
-    return value * value
-
-
-def test_openrouter_tool_binding():
-    llm = OpenRouterLLM()
-
-    llm_with_tools = llm.bind_tools([test_calculator])
-
-    assert llm_with_tools is not None
-
-    print("Tool binding successful.")
-
-
-# --------------------------------------------------
-# TEST 3: Actual OpenRouter tool calling
-# --------------------------------------------------
-
-def test_openrouter_tool_call():
-    llm = OpenRouterLLM()
-
-    llm_with_tools = llm.bind_tools([test_calculator])
-
-    response = llm_with_tools.invoke([
-        HumanMessage(
-            content=(
-                "You must use the test_calculator tool "
-                "with value 7. Do not calculate it yourself."
-            )
-        )
-    ])
-
-    print("Response:", response)
-
-    assert isinstance(response, AIMessage)
-    assert response.tool_calls, "Model did not call the tool."
-
-    tool_call = response.tool_calls[0]
-
-    assert tool_call["name"] == "test_calculator"
-    assert tool_call["args"]["value"] == 7
-
-    print("Tool call:", tool_call)
-
-
-# --------------------------------------------------
-# TEST 4: LangGraph
-# --------------------------------------------------
-
-def test_langgraph():
-    from packages.agent_graph.builder import agent_graph
-
-    result = agent_graph.invoke({
+    result = await agent_graph.ainvoke({
         "messages": [
-            HumanMessage(content="Say hello in one short sentence.")
+            {"role": "user", "content": "Hello! Introduce yourself briefly."}
         ]
     })
 
-    assert result["messages"]
-    assert isinstance(result["messages"][-1], AIMessage)
+    response = result["messages"][-1].content
 
-    print("Agent response:", result["messages"][-1].content)
+    assert response, "Agent returned an empty response"
 
-
-# --------------------------------------------------
-# TEST 5: Speech-to-text
-# --------------------------------------------------
-
-def test_stt():
-    from packages.speech.faster_whisper_stt import FasterWhisperSTT
-    from packages.audio.recording.microphone_recorder import MicrophoneRecorder
-
-    recorder = MicrophoneRecorder()
-    stt = FasterWhisperSTT()
-
-    try:
-        print("Speak a short sentence...")
-        audio = recorder.record()
-
-        text = stt.transcribe(audio)
-
-        assert text and text.strip()
-
-        print("Transcription:", text)
-
-    finally:
-        stt.destroy()
+    print("Agent response:", response)
+    print("[PASS] Async agent response")
 
 
 # --------------------------------------------------
-# TEST 6: Text-to-speech
+# Test 2: Actual asynchronous web search tool
 # --------------------------------------------------
 
-def test_tts():
-    from packages.speech.tts.pyttsx3_tts import Pyttsx3TTS
+async def test_async_web_search():
+    print("\n[TEST 2] Async web search")
 
-    tts = Pyttsx3TTS(rate=175, volume=1.0)
+    result = await web_search.ainvoke({
+        "query": "Python programming language"
+    })
 
-    try:
-        tts.speak("Text to speech is working correctly.")
-    finally:
-        tts.destroy()
+    assert isinstance(result, str)
+    assert result.strip(), "Web search returned an empty result"
 
-
-# --------------------------------------------------
-# TEST 7: Complete voice pipeline
-# --------------------------------------------------
-
-def test_voice_pipeline():
-    from packages.agent_graph.builder import agent_graph
-    from packages.speech.faster_whisper_stt import FasterWhisperSTT
-    from packages.audio.recording.microphone_recorder import MicrophoneRecorder
-    from packages.speech.tts.pyttsx3_tts import Pyttsx3TTS
-
-    recorder = MicrophoneRecorder()
-    stt = FasterWhisperSTT()
-    tts = Pyttsx3TTS(rate=175, volume=1.0)
-
-    try:
-        print("Speak a question...")
-        audio = recorder.record()
-
-        text = stt.transcribe(audio)
-        assert text and text.strip()
-
-        print("You said:", text)
-
-        result = agent_graph.invoke({
-            "messages": [HumanMessage(content=text)]
-        })
-
-        response = result["messages"][-1].content
-
-        assert response and response.strip()
-
-        print("Agent:", response)
-        tts.speak(response)
-
-    finally:
-        stt.destroy()
-        tts.destroy()
+    print("Search result:", result[:300])
+    print("[PASS] Async web search")
 
 
 # --------------------------------------------------
-# TEST 8: Continuous voice agent
+# Test 3: Parallel execution of multiple tools
 # --------------------------------------------------
 
-def test_continuous_agent():
-    from packages.agent_graph.builder import agent_graph
-    from packages.core.runtime.agent_runtime import AgentRuntime
-    from packages.speech.faster_whisper_stt import FasterWhisperSTT
-    from packages.audio.recording.microphone_recorder import MicrophoneRecorder
-    from packages.speech.tts.pyttsx3_tts import Pyttsx3TTS
+@tool
+async def slow_tool(value: int) -> str:
+    """Wait for two seconds and return the supplied value."""
+    await asyncio.sleep(2)
+    return f"Result: {value}"
+
+
+async def test_parallel_tool_execution():
+    print("\n[TEST 3] Parallel tool execution")
+
+    builder = StateGraph(MessagesState)
+
+    builder.add_node("tools", ToolNode([slow_tool]))
+    builder.add_edge(START, "tools")
+    builder.add_edge("tools", END)
+
+    graph = builder.compile()
+
+    message = AIMessage(
+        content="",
+        tool_calls=[
+            {
+                "name": "slow_tool",
+                "args": {"value": 1},
+                "id": "call_1",
+                "type": "tool_call",
+            },
+            {
+                "name": "slow_tool",
+                "args": {"value": 2},
+                "id": "call_2",
+                "type": "tool_call",
+            },
+        ],
+    )
+
+    start = time.perf_counter()
+
+    result = await graph.ainvoke({
+        "messages": [message]
+    })
+
+    elapsed = time.perf_counter() - start
+
+    tool_results = result["messages"][1:]
+
+    assert len(tool_results) == 2
+    assert elapsed < 3.5, (
+        f"Expected parallel execution, but took {elapsed:.2f} seconds"
+    )
+
+    print("Tool results:", [msg.content for msg in tool_results])
+    print(f"Execution time: {elapsed:.2f} seconds")
+    print("[PASS] Parallel tool execution")
+
+
+# --------------------------------------------------
+# Test 4: Runtime async bridge
+# --------------------------------------------------
+
+async def test_runtime_async_execution():
+    print("\n[TEST 4] Runtime async execution")
 
     runtime = AgentRuntime(
         graph=agent_graph,
-        stt=FasterWhisperSTT(),
-        recorder=MicrophoneRecorder(),
-        tts=Pyttsx3TTS(rate=175, volume=1.0)
+        stt=None,
+        recorder=None,
+        tts=None,
     )
 
-    runtime.run()
+    response = await runtime._process_text_async(
+        "What is Python? Answer in one sentence."
+    )
 
+    assert isinstance(response, str)
+    assert response.strip()
+
+    print("Runtime response:", response)
+    print("[PASS] Runtime async execution")
 
 # --------------------------------------------------
-# TEST RUNNER
+# Test runner
 # --------------------------------------------------
 
-TESTS = [
-    ("OpenRouter connection", test_openrouter_connection),
-    ("OpenRouter tool binding", test_openrouter_tool_binding),
-    ("OpenRouter tool calling", test_openrouter_tool_call),
-    ("LangGraph", test_langgraph),
-    ("Speech-to-text", test_stt),
-    ("Text-to-speech", test_tts),
-    ("Complete voice pipeline", test_voice_pipeline),
-    ("Continuous voice agent", test_continuous_agent),
-]
-
+async def run_async_tests():
+    await test_async_agent_response()
+    await test_async_web_search()
+    await test_parallel_tool_execution()
+    await test_runtime_async_execution()
 
 def main():
-    if not os.getenv("OPENROUTER_API_KEY"):
-        print("[ERROR] OPENROUTER_API_KEY is missing.")
-        return
+    try:
+        asyncio.run(run_async_tests())
 
-    for name, test_function in TESTS:
-        passed = run_test(name, test_function)
+        # Runtime bridge uses asyncio.run internally.
+        # Therefore, call it outside the running event loop.
+        # test_runtime_async_bridge()
 
-        if not passed:
-            print("\nTesting stopped because a test failed.")
-            return
+        print("\n================================")
+        print("ALL ASYNC TESTS PASSED")
+        print("================================")
 
-        # Continuous agent is intentionally the final test.
-        if name == "Continuous voice agent":
-            print("\nPress Ctrl+C to stop the agent.")
+    except Exception as exc:
+        print("\n[FAILED]", repr(exc))
+        raise
 
 
 if __name__ == "__main__":
     main()
+    

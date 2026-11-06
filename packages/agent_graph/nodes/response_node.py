@@ -4,16 +4,15 @@ from packages.agent_graph.prompts.response_prompt import DESKTOP_AGENT_SYSTEM_PR
 from langchain_core.messages import SystemMessage
 from packages.tools import TOOLS
 
-def response_node(state: AgentState) -> dict:
-    # Get the chat LLM from the LLM manager
+
+async def response_node(state: AgentState) -> dict:
     llm_with_tools = llm_manager.get_chat_llm().bind_tools(TOOLS)
-    
-    # messages
+
     messages = [
         SystemMessage(content=DESKTOP_AGENT_SYSTEM_PROMPT),
-        *state['messages']
+        *state["messages"]
     ]
-    # Generate a response based on the messages in the state
-    response = llm_with_tools.invoke(messages)
-    
-    return {'messages': [response]}
+
+    response = await llm_with_tools.ainvoke(messages)
+
+    return {"messages": [response]}
