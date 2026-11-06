@@ -12,31 +12,38 @@ class AgentRuntime:
         self.tts = tts
         
     def run(self):
+        print("[Agent] Started. Press Ctrl+C to stop.")
+
         try:
             while True:
-                print("\n[Agent] Listening... Speak now.")
-                audio = self._record_audio()
-    
-                print("[Agent] Transcribing...")
-                text = self._transcribe_audio(audio)
-    
-                if text:
+                try:
+                    print("\n[Agent] Listening...")
+
+                    audio = self._record_audio()
+                    text = self._transcribe_audio(audio)
+
+                    if not text or not text.strip():
+                        print("[Agent] No speech recognized.")
+                        continue
+
+                    print(f"[User]: {text}")
+
                     response = self._process_text(text)
+
                     print(f"[Agent]: {response}")
-                    try:
+
+                    if response and response.strip():
                         self.tts.speak(response)
-                    except Exception as exc:
-                        print(f"[TTS] Speech output failed: {exc}")
-                else:
-                    print("[Agent] No speech recognized.")
-    
-                time.sleep(0.3)
+
+                except Exception as exc:
+                    print(f"[Agent] Request failed: {exc}")
+
         except KeyboardInterrupt:
-            print("\nAgent Stopped")
-            
+            print("\n[Agent] Stopping...")
+
         finally:
             self._destroy()
-    
+            
     def _process_text(self, text):
         # Process the text and update the state graph accordingly
         result = self.graph.invoke({

@@ -1,4 +1,4 @@
-from packages.llm.hugging_face_llm import HuggingFaceLLM
+from packages.llm.openrouter_llm import OpenRouterLLM
 import os
 
 class LLMManager:
@@ -9,11 +9,11 @@ class LLMManager:
         
     def __set_llm(self, model_type):
         if model_type == "chat":
-            self.chat_llm = HuggingFaceLLM(model_name="gpt-4", api_key=os.getenv("HUGGINGFACEHUB_API_TOKEN"))
+            self.chat_llm = OpenRouterLLM(model_name="openrouter/free")
         elif model_type == "embedding":
-            self.embedding_llm = HuggingFaceLLM(model_name="bert-base-uncased", api_key=os.getenv("HUGGINGFACEHUB_API_TOKEN"))
+            self.embedding_llm = OpenRouterLLM(model_name="openrouter/free")
         elif model_type == "structured":
-            self.structured_llm = HuggingFaceLLM(model_name="t5-base", api_key=os.getenv("HUGGINGFACEHUB_API_TOKEN"))
+            self.structured_llm = OpenRouterLLM(model_name="openrouter/free")
         else:
             raise ValueError(f"Unknown model type: {model_type}")
         
