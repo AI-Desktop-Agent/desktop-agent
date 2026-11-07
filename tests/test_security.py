@@ -1,43 +1,98 @@
 import unittest
+from dataclasses import FrozenInstanceError
 
-from packages.security.policy import POLICIES, RISK_ORDER, resolve_risk, worst
+from langchain_core.tools import tool
+
+from packages.security.registry import REGISTRY, get_tools, secure_tool
 
 
-class TestPolicy(unittest.TestCase):
-    def test_every_tier_has_a_policy(self):
-        for tier in RISK_ORDER:
-            self.assertIn(tier, POLICIES)
+class TestRegistry(unittest.TestCase):
+    def setUp(self):
+        self._saved = dict(REGISTRY)
+        REGISTRY.clear()
 
-    def test_worst_picks_the_more_dangerous(self):
-        self.assertEqual(worst("low", "high"), "high")
-        self.assertEqual(worst("destructive", "medium", "low"), "destructive")
+    def tearDown(self):
+        REGISTRY.clear()
+        REGISTRY.update(self._saved)
 
-    def test_plain_tier_name(self):
-        self.assertEqual(resolve_risk("low", {}), "low")
+    def test_registers_tool_with_its_settings(self):
+        @secure_tool(risk="high", external=True, scopes=["mail.send"])
+        @tool("send_x")
+        def send_x(to: str) -> str:
+            """Send something."""
+            return "sent"
 
-    def test_risk_function_sees_the_arguments(self):
+        spec = REGISTRY["send_x"]
+        self.assertEqual(spec.risk, "high")
+        self.assertTrue(spec.external)
+        self.assertFalse(spec.taints)
+        self.assertEqual(spec.scopes, frozenset({"mail.send"}))
+
+    def test_default_risk_is_high(self):
+        @secure_tool()
+        @tool("no_risk_given")
+        def f() -> str:
+            """Do something."""
+            return "x"
+
+        self.assertEqual(REGISTRY["no_risk_given"].risk, "high")
+
+    def test_risk_can_be_a_function(self):
         def risk(args):
-            return "destructive" if args["action"] == "delete" else "low"
+            return "low"
 
-        self.assertEqual(resolve_risk(risk, {"action": "delete"}), "destructive")
-        self.assertEqual(resolve_risk(risk, {"action": "read"}), "low")
+        @secure_tool(risk=risk)
+        @tool("computed")
+        def f(x: str) -> str:
+            """Do something."""
+            return x
 
-    def test_unknown_tier_fails_closed(self):
-        self.assertEqual(resolve_risk("banana", {}), "high")
+        self.assertIs(REGISTRY["computed"].risk, risk)
 
-    def test_crashing_risk_function_fails_closed(self):
-        self.assertEqual(resolve_risk(lambda a: a["missing"], {}), "high")
+    def test_unknown_tier_is_rejected_immediately(self):
+        with self.assertRaises(ValueError):
+            secure_tool(risk="hihg")
 
-    def test_taint_raises_external_tools(self):
-        self.assertEqual(resolve_risk("low", {}, external=True, tainted=True), "high")
+    def test_wrong_decorator_order_is_rejected(self):
+        with self.assertRaises(TypeError):
+            secure_tool("low")(lambda: None)
 
-    def test_taint_ignores_non_external_tools(self):
-        self.assertEqual(resolve_risk("low", {}, external=False, tainted=True), "low")
+    def test_duplicate_name_is_rejected(self):
+        @secure_tool("low")
+        @tool("dup")
+        def a() -> str:
+            """First."""
+            return "a"
 
-    def test_taint_never_lowers_risk(self):
-        self.assertEqual(
-            resolve_risk("destructive", {}, external=True, tainted=True), "destructive"
-        )
+        with self.assertRaises(ValueError):
+            @secure_tool("low")
+            @tool("dup")
+            def b() -> str:
+                """Second."""
+                return "b"
+
+    def test_get_tools_returns_the_tool_objects(self):
+        @secure_tool("low")
+        @tool("listed")
+        def f() -> str:
+            """Do something."""
+            return "x"
+
+        self.assertEqual([t.name for t in get_tools()], ["listed"])
+
+    def test_spec_is_read_only(self):
+        @secure_tool("low")
+        @tool("frozen_one")
+        def f() -> str:
+            """Do something."""
+            return "x"
+
+        with self.assertRaises(FrozenInstanceError):
+            REGISTRY["frozen_one"].risk = "high"
+
+    def test_scopes_must_not_be_a_plain_string(self):
+        with self.assertRaises(TypeError):
+            secure_tool("low", scopes="mail.send")
 
 
 if __name__ == "__main__":
