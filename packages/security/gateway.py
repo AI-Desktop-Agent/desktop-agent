@@ -266,5 +266,5 @@ class ToolGateway:
 
 
 gateway = ToolGateway(
-    taint_callback=taint_tracker
+    taint_callback=taint_tracker.mark_tainted
 )
