@@ -1,8 +1,9 @@
 
 from langchain_core.tools import tool
 from langchain_community.tools import DuckDuckGoSearchRun
+from packages.security.registry import secure_tool
 
-
+@secure_tool(risk="medium", external=True, taints=True)
 @tool
 async def web_search(query: str) -> str:
     """

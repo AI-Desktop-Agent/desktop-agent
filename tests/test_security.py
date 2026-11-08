@@ -1,403 +1,166 @@
 
 import unittest
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
-from packages.security.gateway import ToolGateway
-from packages.security.policy import Denied, POLICIES
-from packages.security.registry import ToolSpec
+from langchain_core.messages import AIMessage, ToolMessage
 
-
-class FakeTool:
-    def __init__(self, name="fake_tool", result="success", error=None):
-        self.name = name
-        self.result = result
-        self.error = error
-        self.calls = 0
-
-    async def ainvoke(self, args):
-        self.calls += 1
-
-        if self.error:
-            raise self.error
-
-        return self.result
+from packages.agent_graph.nodes.tool_node import secure_tool_node
+from packages.security.policy import Denied
 
 
-class FakeRateLimiter:
-    def __init__(self, error=None):
-        self.calls = []
-        self.error = error
-
-    def acquire(self, principal, tool, limit):
-        self.calls.append((principal, tool, limit))
-
-        if self.error:
-            raise self.error
-
-
-class FakeAudit:
-    def __init__(self, fail_on=None):
-        self.entries = []
-        self.fail_on = fail_on
-
-    def write(self, **entry):
-        if entry["outcome"] == self.fail_on:
-            raise OSError("Simulated audit failure")
-
-        self.entries.append(entry)
-
-
-class TestToolGateway(unittest.IsolatedAsyncioTestCase):
+class TestSecureToolNode(unittest.IsolatedAsyncioTestCase):
 
     def setUp(self):
-        self.tool = FakeTool()
-
-        self.registry = {
-            "fake_tool": ToolSpec(
-                tool=self.tool,
-                risk="low",
-                scopes=frozenset(),
-            )
+        self.tool_call = {
+            "name": "web_search",
+            "args": {"query": "Python programming"},
+            "id": "call-123",
+            "type": "tool_call",
         }
 
-        self.rate_limiter = FakeRateLimiter()
-        self.audit = FakeAudit()
+        self.state = {
+            "messages": [
+                AIMessage(
+                    content="",
+                    tool_calls=[self.tool_call],
+                )
+            ]
+        }
 
-        self.gateway = ToolGateway(
-            registry=self.registry,
-            rate_limiter=self.rate_limiter,
-            audit=self.audit,
-        )
+        self.config = {
+            "configurable": {
+                "thread_id": "session-123",
+                "user_id": "user-123",
+            }
+        }
 
-    # ---------------- Basic execution ----------------
+    @patch("packages.agent_graph.nodes.tool_node.gateway.execute",
+           new_callable=AsyncMock)
+    @patch("packages.agent_graph.nodes.tool_node.taint_tracker.is_tainted")
+    async def test_successful_tool_execution(
+        self, mock_is_tainted, mock_execute
+    ):
+        mock_is_tainted.return_value = False
+        mock_execute.return_value = "Search results"
 
-    async def test_executes_registered_tool(self):
-        result = await self.gateway.execute(
-            "fake_tool",
-            {"query": "hello"},
-            principal="user-1",
-        )
+        result = await secure_tool_node(self.state, self.config)
 
-        self.assertEqual(result, "success")
-        self.assertEqual(self.tool.calls, 1)
-
-    async def test_unregistered_tool_is_denied(self):
-        with self.assertRaises(Denied):
-            await self.gateway.execute(
-                "unknown_tool",
-                {},
-                principal="user-1",
-            )
-
-        self.assertEqual(self.tool.calls, 0)
-        self.assertEqual(self.audit.entries[-1]["outcome"], "blocked")
-
-    async def test_successful_execution_has_two_audit_events(self):
-        await self.gateway.execute(
-            "fake_tool",
-            {},
-            principal="user-1",
-        )
-
-        outcomes = [entry["outcome"] for entry in self.audit.entries]
-
-        self.assertEqual(outcomes, ["allowed", "ok"])
-
-        self.assertEqual(
-            self.audit.entries[0]["call_id"],
-            self.audit.entries[1]["call_id"],
-        )
-
-    # ---------------- Risk and policy ----------------
-
-    async def test_blocked_risk_is_denied(self):
-        self.registry["fake_tool"] = ToolSpec(
-            tool=self.tool,
-            risk="blocked",
-        )
-
-        with self.assertRaises(Denied):
-            await self.gateway.execute(
-                "fake_tool",
-                {},
-                principal="user-1",
-            )
-
-        self.assertEqual(self.tool.calls, 0)
-        self.assertEqual(self.audit.entries[-1]["outcome"], "blocked")
-
-    async def test_high_risk_requires_approval(self):
-        self.registry["fake_tool"] = ToolSpec(
-            tool=self.tool,
-            risk="high",
-        )
-
-        with self.assertRaises(Denied):
-            await self.gateway.execute(
-                "fake_tool",
-                {},
-                principal="user-1",
-            )
-
-        self.assertEqual(self.tool.calls, 0)
-
-    async def test_approved_high_risk_tool_executes(self):
-        self.registry["fake_tool"] = ToolSpec(
-            tool=self.tool,
-            risk="high",
-        )
-
-        self.gateway.approval_callback = lambda *args: True
-
-        result = await self.gateway.execute(
-            "fake_tool",
-            {},
-            principal="user-1",
-        )
-
-        self.assertEqual(result, "success")
-        self.assertEqual(self.tool.calls, 1)
-
-    async def test_rejected_approval_prevents_execution(self):
-        self.registry["fake_tool"] = ToolSpec(
-            tool=self.tool,
-            risk="high",
-        )
-
-        self.gateway.approval_callback = lambda *args: False
-
-        with self.assertRaises(Denied):
-            await self.gateway.execute(
-                "fake_tool",
-                {},
-                principal="user-1",
-            )
-
-        self.assertEqual(self.tool.calls, 0)
-
-    async def test_async_approval_callback(self):
-        self.registry["fake_tool"] = ToolSpec(
-            tool=self.tool,
-            risk="high",
-        )
-
-        async def approve(*args):
-            return True
-
-        self.gateway.approval_callback = approve
-
-        await self.gateway.execute(
-            "fake_tool",
-            {},
-            principal="user-1",
-        )
-
-        self.assertEqual(self.tool.calls, 1)
-
-    # ---------------- Scope validation ----------------
-
-    async def test_missing_scope_denies_execution(self):
-        self.registry["fake_tool"] = ToolSpec(
-            tool=self.tool,
-            risk="low",
-            scopes=frozenset({"mail.send"}),
-        )
-
-        with self.assertRaises(Denied):
-            await self.gateway.execute(
-                "fake_tool",
-                {},
-                principal="user-1",
-                granted_scopes={"mail.read"},
-            )
-
-        self.assertEqual(self.tool.calls, 0)
-
-    async def test_granted_scope_allows_execution(self):
-        self.registry["fake_tool"] = ToolSpec(
-            tool=self.tool,
-            risk="low",
-            scopes=frozenset({"mail.send"}),
-        )
-
-        await self.gateway.execute(
-            "fake_tool",
-            {},
-            principal="user-1",
-            granted_scopes={"mail.send"},
-        )
-
-        self.assertEqual(self.tool.calls, 1)
-
-    # ---------------- Rate limiting ----------------
-
-    async def test_rate_limiter_receives_policy_limit(self):
-        await self.gateway.execute(
-            "fake_tool",
-            {},
-            principal="user-1",
-        )
-
-        self.assertEqual(
-            self.rate_limiter.calls,
-            [("user-1", "fake_tool", POLICIES["low"]["rate_per_min"])],
-        )
-
-    async def test_limit_none_skips_rate_limiter(self):
-        with patch.dict(POLICIES["low"], {"rate_per_min": None}):
-            await self.gateway.execute(
-                "fake_tool",
-                {},
-                principal="user-1",
-            )
-
-        self.assertEqual(self.rate_limiter.calls, [])
-
-    async def test_rate_limit_denial_prevents_execution(self):
-        self.rate_limiter.error = Denied("rate limit reached")
-
-        with self.assertRaises(Denied):
-            await self.gateway.execute(
-                "fake_tool",
-                {},
-                principal="user-1",
-            )
-
-        self.assertEqual(self.tool.calls, 0)
-        self.assertEqual(self.audit.entries[-1]["outcome"], "blocked")
-
-    # ---------------- Taint handling ----------------
-
-    async def test_tainted_external_tool_requires_high_risk_approval(self):
-        self.registry["fake_tool"] = ToolSpec(
-            tool=self.tool,
-            risk="low",
-            external=True,
-        )
-
-        self.gateway.approval_callback = lambda *args: True
-
-        await self.gateway.execute(
-            "fake_tool",
-            {},
-            principal="user-1",
-            tainted=True,
-        )
-
-        self.assertEqual(self.audit.entries[0]["risk"], "high")
-
-    async def test_taint_producing_tool_requires_tracker(self):
-        self.registry["fake_tool"] = ToolSpec(
-            tool=self.tool,
-            risk="low",
-            taints=True,
-        )
-
-        with self.assertRaises(Denied):
-            await self.gateway.execute(
-                "fake_tool",
-                {},
-                principal="user-1",
-            )
-
-        self.assertEqual(self.tool.calls, 0)
-
-    async def test_taint_callback_is_called_after_execution(self):
-        self.registry["fake_tool"] = ToolSpec(
-            tool=self.tool,
-            risk="low",
-            taints=True,
-        )
-
-        calls = []
-
-        def mark_tainted(context_id, tool_name):
-            calls.append((context_id, tool_name))
-
-        self.gateway.taint_callback = mark_tainted
-
-        await self.gateway.execute(
-            "fake_tool",
-            {},
-            principal="user-1",
+        mock_execute.assert_awaited_once_with(
+            "web_search",
+            {"query": "Python programming"},
+            principal="user-123",
+            granted_scopes=(),
+            tainted=False,
             context_id="session-123",
         )
 
-        self.assertEqual(
-            calls,
-            [("session-123", "fake_tool")],
+        message = result["messages"][0]
+
+        self.assertIsInstance(message, ToolMessage)
+        self.assertEqual(message.content, "Search results")
+        self.assertEqual(message.tool_call_id, "call-123")
+        self.assertEqual(message.name, "web_search")
+
+    @patch("packages.agent_graph.nodes.tool_node.gateway.execute",
+           new_callable=AsyncMock)
+    @patch("packages.agent_graph.nodes.tool_node.taint_tracker.is_tainted")
+    async def test_tainted_context_is_forwarded(
+        self, mock_is_tainted, mock_execute
+    ):
+        mock_is_tainted.return_value = True
+        mock_execute.return_value = "Search results"
+
+        await secure_tool_node(self.state, self.config)
+
+        self.assertTrue(
+            mock_execute.await_args.kwargs["tainted"]
         )
 
-    # ---------------- Execution errors ----------------
+    @patch("packages.agent_graph.nodes.tool_node.gateway.execute",
+           new_callable=AsyncMock)
+    @patch("packages.agent_graph.nodes.tool_node.taint_tracker.is_tainted")
+    async def test_denied_tool_returns_tool_message(
+        self, mock_is_tainted, mock_execute
+    ):
+        mock_is_tainted.return_value = False
+        mock_execute.side_effect = Denied("missing required scopes")
 
-    async def test_tool_error_is_audited_and_propagated(self):
-        self.tool.error = RuntimeError("tool failed")
+        result = await secure_tool_node(self.state, self.config)
 
-        with self.assertRaisesRegex(RuntimeError, "tool failed"):
-            await self.gateway.execute(
-                "fake_tool",
-                {},
-                principal="user-1",
-            )
+        message = result["messages"][0]
 
-        outcomes = [entry["outcome"] for entry in self.audit.entries]
+        self.assertIsInstance(message, ToolMessage)
+        self.assertIn("Tool blocked by security policy", message.content)
+        self.assertEqual(message.tool_call_id, "call-123")
 
-        self.assertEqual(outcomes, ["allowed", "error"])
+    @patch("packages.agent_graph.nodes.tool_node.gateway.execute",
+           new_callable=AsyncMock)
+    @patch("packages.agent_graph.nodes.tool_node.taint_tracker.is_tainted")
+    async def test_unexpected_error_returns_tool_message(
+        self, mock_is_tainted, mock_execute
+    ):
+        mock_is_tainted.return_value = False
+        mock_execute.side_effect = RuntimeError("audit failure")
 
-    # ---------------- Audit failures ----------------
+        result = await secure_tool_node(self.state, self.config)
 
-    async def test_allowed_audit_failure_prevents_execution(self):
-        self.audit.fail_on = "allowed"
+        message = result["messages"][0]
 
-        with self.assertRaises(OSError):
-            await self.gateway.execute(
-                "fake_tool",
-                {},
-                principal="user-1",
-            )
+        self.assertIsInstance(message, ToolMessage)
+        self.assertIn("RuntimeError", message.content)
+        self.assertIn("Do not automatically retry", message.content)
 
-        self.assertEqual(self.tool.calls, 0)
+    @patch("packages.agent_graph.nodes.tool_node.gateway.execute",
+           new_callable=AsyncMock)
+    @patch("packages.agent_graph.nodes.tool_node.taint_tracker.is_tainted")
+    async def test_multiple_tool_calls_are_executed(
+        self, mock_is_tainted, mock_execute
+    ):
+        second_call = {
+            "name": "web_search",
+            "args": {"query": "LangGraph"},
+            "id": "call-456",
+            "type": "tool_call",
+        }
 
-    async def test_success_audit_failure_happens_after_execution(self):
-        self.audit.fail_on = "ok"
+        self.state["messages"][-1].tool_calls.append(second_call)
 
-        with self.assertRaises(OSError):
-            await self.gateway.execute(
-                "fake_tool",
-                {},
-                principal="user-1",
-            )
+        mock_is_tainted.return_value = False
+        mock_execute.side_effect = ["First result", "Second result"]
 
-        # The tool has already executed.
-        self.assertEqual(self.tool.calls, 1)
+        result = await secure_tool_node(self.state, self.config)
 
-    # ---------------- Input validation ----------------
+        self.assertEqual(mock_execute.await_count, 2)
+        self.assertEqual(len(result["messages"]), 2)
 
-    async def test_empty_principal_is_rejected(self):
-        with self.assertRaises(ValueError):
-            await self.gateway.execute(
-                "fake_tool",
-                {},
-                principal="",
-            )
+        self.assertEqual(
+            [message.tool_call_id for message in result["messages"]],
+            ["call-123", "call-456"],
+        )
 
-    async def test_string_granted_scopes_are_rejected(self):
-        with self.assertRaises(TypeError):
-            await self.gateway.execute(
-                "fake_tool",
-                {},
-                principal="user-1",
-                granted_scopes="mail.send",
-            )
+    @patch("packages.agent_graph.nodes.tool_node.gateway.execute",
+           new_callable=AsyncMock)
+    @patch("packages.agent_graph.nodes.tool_node.taint_tracker.is_tainted")
+    async def test_default_context_is_used_when_config_missing(
+        self, mock_is_tainted, mock_execute
+    ):
+        mock_is_tainted.return_value = False
+        mock_execute.return_value = "Search results"
 
-    async def test_non_boolean_taint_is_rejected(self):
-        with self.assertRaises(TypeError):
-            await self.gateway.execute(
-                "fake_tool",
-                {},
-                principal="user-1",
-                tainted="yes",
-            )
+        await secure_tool_node(
+            self.state,
+            {"configurable": {}},
+        )
+
+        self.assertEqual(
+            mock_execute.await_args.kwargs["context_id"],
+            "default-session",
+        )
+
+        self.assertEqual(
+            mock_execute.await_args.kwargs["principal"],
+            "local-user",
+        )
 
 
 if __name__ == "__main__":

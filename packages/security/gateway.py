@@ -10,6 +10,7 @@ from packages.security.policy import Denied, POLICIES, resolve_risk
 from packages.security.registry import REGISTRY
 from packages.security.limits import limiter
 from packages.security.audit import audit_log
+from .taint import taint_tracker
 
 
 class ToolGateway:
@@ -264,4 +265,6 @@ class ToolGateway:
         return result
 
 
-gateway = ToolGateway()
+gateway = ToolGateway(
+    taint_callback=taint_tracker
+)
