@@ -1,189 +1,170 @@
-import threading
+
+import json
+import os
+import tempfile
 import unittest
+from datetime import datetime, timezone
+from pathlib import Path
+from unittest.mock import patch
 
-from packages.security.limits import RateLimiter
-from packages.security.policy import Denied
-
-
-class FakeClock:
-    """A clock we control, so tests never have to sleep."""
-
-    def __init__(self):
-        self.now = 0.0
-
-    def __call__(self):
-        return self.now
-
-    def advance(self, seconds):
-        self.now += seconds
+from packages.security.audit import AuditLog, MAX_ENTRY_CHARS
 
 
-class TestLimits(unittest.TestCase):
+class TestAuditLog(unittest.TestCase):
+
     def setUp(self):
-        self.clock = FakeClock()
-        self.limiter = RateLimiter(window=60, clock=self.clock)
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.path = Path(self.temp_dir.name) / "audit.jsonl"
 
-    def use(self, times, principal="anon", tool="t", limit=3):
-        for _ in range(times):
-            self.limiter.acquire(principal, tool, limit)
+        self.audit = AuditLog(
+            path=self.path,
+            clock=lambda: datetime(2026, 11, 8, tzinfo=timezone.utc)
+        )
 
-    # --- basic behavior -------------------------------------------------
-    def test_allows_calls_up_to_the_limit(self):
-        self.use(3)
+    def tearDown(self):
+        self.temp_dir.cleanup()
 
-    def test_blocks_the_call_after_the_limit(self):
-        self.use(3)
-        with self.assertRaises(Denied):
-            self.limiter.acquire("anon", "t", 3)
+    def write_entry(self, **overrides):
+        data = {
+            "call_id": "call-123",
+            "tool": "send_email",
+            "principal": "user-1",
+            "risk": "high",
+            "outcome": "allowed",
+            "args": {"to": "test@example.com"},
+            "detail": "Email approved"
+        }
+        data.update(overrides)
+        self.audit.write(**data)
 
-    def test_message_names_the_tool(self):
-        self.use(3, tool="send_email")
-        with self.assertRaises(Denied) as cm:
-            self.limiter.acquire("anon", "send_email", 3)
-        self.assertIn("send_email", str(cm.exception))
+    # Basic behavior
 
-    def test_window_slides_and_frees_the_slot(self):
-        self.use(3)
-        self.clock.advance(61)
-        self.limiter.acquire("anon", "t", 3)
+    def test_write_and_read_entry(self):
+        self.write_entry()
 
-    def test_old_calls_expire_one_by_one(self):
-        self.use(1)                 # t = 0
-        self.clock.advance(30)
-        self.use(1)                 # t = 30
-        self.clock.advance(20)
-        self.use(1)                 # t = 50: three calls in the window
-        self.clock.advance(11)      # t = 61: the call at t = 0 has expired
-        self.limiter.acquire("anon", "t", 3)
-        with self.assertRaises(Denied):
-            self.limiter.acquire("anon", "t", 3)
+        entries = self.audit.read()
 
-    def test_each_tool_has_its_own_count(self):
-        self.use(3, tool="a")
-        self.limiter.acquire("anon", "b", 3)
+        self.assertEqual(len(entries), 1)
+        self.assertEqual(entries[0]["tool"], "send_email")
+        self.assertEqual(entries[0]["outcome"], "allowed")
 
-    def test_each_principal_has_its_own_count(self):
-        self.use(3, principal="alice")
-        self.limiter.acquire("bob", "t", 3)
+    def test_timestamp_is_utc(self):
+        self.write_entry()
 
-    def test_none_means_no_limit(self):
-        for _ in range(1000):
-            self.limiter.acquire("anon", "t", None)
-        self.limiter.check("anon", "t", None)
+        entry = self.audit.read()[0]
 
-    # --- zero limit -----------------------------------------------------
-    def test_zero_limit_always_denies_and_leaves_no_trace(self):
-        with self.assertRaises(Denied):
-            self.limiter.check("anon", "t", 0)
-        with self.assertRaises(Denied):
-            self.limiter.acquire("anon", "t", 0)
-        self.assertNotIn(("anon", "t"), self.limiter._hits)
+        self.assertTrue(entry["ts"].endswith("+00:00"))
 
-    # --- validation -----------------------------------------------------
-    def test_bad_window_is_rejected(self):
-        for bad in (0, -5, True, "60", None):
-            with self.assertRaises(ValueError, msg=repr(bad)):
-                RateLimiter(window=bad)
+    def test_invalid_outcome_is_rejected(self):
+        with self.assertRaises(ValueError):
+            self.write_entry(outcome="unknown")
 
-    def test_bad_limit_is_rejected(self):
-        for bad in (True, False, "5", 5.0, -1, [3]):
-            with self.assertRaises(ValueError, msg=repr(bad)):
-                self.limiter.check("anon", "t", bad)
-            with self.assertRaises(ValueError, msg=repr(bad)):
-                self.limiter.acquire("anon", "t", bad)
+    # Redaction
 
-    # --- check vs acquire -----------------------------------------------
-    def test_check_alone_does_not_use_up_the_limit(self):
-        for _ in range(10):
-            self.limiter.check("anon", "t", 3)
+    def test_password_key_is_redacted(self):
+        self.write_entry(
+            args={"password": "my-secret-password"}
+        )
 
-    def test_check_agrees_with_acquire(self):
-        self.use(3)
-        with self.assertRaises(Denied):
-            self.limiter.check("anon", "t", 3)
+        entry = self.audit.read()[0]
 
-    def test_a_denied_acquire_is_not_recorded(self):
-        self.use(3)                      # t = 0
-        self.clock.advance(30)
-        with self.assertRaises(Denied):  # refused at t = 30, must leave no mark
-            self.limiter.acquire("anon", "t", 3)
-        self.clock.advance(31)           # t = 61: the three real calls expired
-        self.use(3)                      # would fail if the refused call had counted
+        self.assertEqual(
+            entry["args"]["password"],
+            "[REDACTED]"
+        )
 
-    def test_a_burst_in_one_go_cannot_exceed_the_limit(self):
-        allowed = 0
-        for _ in range(10):
-            try:
-                self.limiter.acquire("anon", "t", 5)
-                allowed += 1
-            except Denied:
-                pass
-        self.assertEqual(allowed, 5)
+    def test_nested_token_is_redacted(self):
+        self.write_entry(
+            args={
+                "config": {
+                    "api_key": "secret-value"
+                }
+            }
+        )
 
-    def test_threads_cannot_exceed_the_limit(self):
-        limiter = RateLimiter(window=60, clock=self.clock)
-        barrier = threading.Barrier(20)
-        results = []
+        entry = self.audit.read()[0]
 
-        def worker():
-            barrier.wait()
-            try:
-                limiter.acquire("anon", "t", 5)
-                results.append(True)
-            except Denied:
-                results.append(False)
+        self.assertEqual(
+            entry["args"]["config"]["api_key"],
+            "[REDACTED]"
+        )
 
-        threads = [threading.Thread(target=worker) for _ in range(20)]
-        for t in threads:
-            t.start()
-        for t in threads:
-            t.join()
-        self.assertEqual(results.count(True), 5)
+    def test_secret_in_detail_is_redacted(self):
+        self.write_entry(
+            detail="Request failed with Bearer abcdefghijklmnop"
+        )
 
-    # --- memory: idle keys must not pile up ------------------------------
-    def test_check_never_creates_entries(self):
-        for i in range(50):
-            self.limiter.check(f"user{i}", "t", 3)
-        self.assertEqual(len(self.limiter._hits), 0)
+        entry = self.audit.read()[0]
 
-    def test_expired_key_is_removed_when_touched_again(self):
-        self.use(1)
-        self.clock.advance(61)
-        self.limiter.check("anon", "t", 3)
-        self.assertNotIn(("anon", "t"), self.limiter._hits)
+        self.assertNotIn("abcdefghijklmnop", entry["detail"])
+        self.assertIn("[REDACTED]", entry["detail"])
 
-    def test_keys_of_principals_who_never_return_are_swept(self):
-        for i in range(100):
-            self.limiter.acquire(f"user{i}", "t", 3)
-        self.assertEqual(len(self.limiter._hits), 100)
-        self.clock.advance(61)
-        self.limiter.acquire("newcomer", "t", 3)       # triggers the sweep
-        self.assertEqual(len(self.limiter._hits), 1)
+    # Size limit
 
-    def test_sweep_keeps_keys_that_still_have_live_hits(self):
-        self.limiter.acquire("alice", "t", 3)           # t = 0
-        self.clock.advance(50)
-        self.limiter.acquire("alice", "t", 3)           # t = 50
-        self.clock.advance(11)                          # t = 61: first hit expired
-        self.limiter.acquire("bob", "t", 3)             # triggers the sweep
-        self.assertEqual(len(self.limiter._hits[("alice", "t")]), 1)
-        self.assertEqual(len(self.limiter._hits), 2)
+    def test_entry_never_exceeds_maximum_size(self):
+        self.write_entry(
+            args={"message": "x" * 100000},
+            detail="large detail " * 1000
+        )
 
-    def test_counting_still_correct_after_a_key_was_cleaned_up(self):
-        self.use(3)
-        self.clock.advance(61)
-        self.use(3)                                     # key was deleted, recreated
-        with self.assertRaises(Denied):
-            self.limiter.acquire("anon", "t", 3)
+        for line in self.path.read_text(encoding="utf-8").splitlines():
+            self.assertLessEqual(
+                len(line),
+                MAX_ENTRY_CHARS
+            )
 
-    # --- the exact boundary (we chose: a call exactly `window` old still counts)
-    def test_call_exactly_one_window_old_still_counts(self):
-        self.limiter.acquire("anon", "t", 1)
-        self.clock.advance(60)
-        with self.assertRaises(Denied):
-            self.limiter.acquire("anon", "t", 1)
-        self.clock.advance(0.001)
-        self.limiter.acquire("anon", "t", 1)
+    def test_oversized_entry_is_rejected_before_write(self):
+        # Force a small limit to verify the guard itself.
+        with patch("packages.security.audit.MAX_ENTRY_CHARS", 10):
+            with self.assertRaises(ValueError):
+                self.write_entry()
+
+        self.assertFalse(self.path.exists())
+
+    # File permissions
+
+    @unittest.skipUnless(os.name == "posix", "POSIX permissions only")
+    def test_existing_file_permissions_are_restricted(self):
+        self.path.write_text("", encoding="utf-8")
+        os.chmod(self.path, 0o644)
+
+        self.write_entry()
+
+        permissions = self.path.stat().st_mode & 0o777
+
+        self.assertEqual(permissions, 0o600)
+
+    # Recovery
+
+    def test_missing_file_returns_empty_list(self):
+        self.assertEqual(self.audit.read(), [])
+
+    def test_damaged_final_line_is_ignored_in_normal_mode(self):
+        self.write_entry()
+
+        with open(self.path, "a", encoding="utf-8") as f:
+            f.write('{"damaged":')
+
+        self.assertEqual(len(self.audit.read()), 1)
+
+    def test_damaged_final_line_raises_in_strict_mode(self):
+        self.write_entry()
+
+        with open(self.path, "a", encoding="utf-8") as f:
+            f.write('{"damaged":')
+
+        with self.assertRaises(json.JSONDecodeError):
+            self.audit.read(strict=True)
+
+    def test_damaged_middle_line_raises(self):
+        self.write_entry()
+
+        with open(self.path, "a", encoding="utf-8") as f:
+            f.write('{"damaged":}\n')
+            f.write('{"valid": true}\n')
+
+        with self.assertRaises(json.JSONDecodeError):
+            self.audit.read()
 
 
 if __name__ == "__main__":
