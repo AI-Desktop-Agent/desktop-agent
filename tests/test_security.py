@@ -1,170 +1,403 @@
 
-import json
-import os
-import tempfile
 import unittest
-from datetime import datetime, timezone
-from pathlib import Path
 from unittest.mock import patch
 
-from packages.security.audit import AuditLog, MAX_ENTRY_CHARS
+from packages.security.gateway import ToolGateway
+from packages.security.policy import Denied, POLICIES
+from packages.security.registry import ToolSpec
 
 
-class TestAuditLog(unittest.TestCase):
+class FakeTool:
+    def __init__(self, name="fake_tool", result="success", error=None):
+        self.name = name
+        self.result = result
+        self.error = error
+        self.calls = 0
+
+    async def ainvoke(self, args):
+        self.calls += 1
+
+        if self.error:
+            raise self.error
+
+        return self.result
+
+
+class FakeRateLimiter:
+    def __init__(self, error=None):
+        self.calls = []
+        self.error = error
+
+    def acquire(self, principal, tool, limit):
+        self.calls.append((principal, tool, limit))
+
+        if self.error:
+            raise self.error
+
+
+class FakeAudit:
+    def __init__(self, fail_on=None):
+        self.entries = []
+        self.fail_on = fail_on
+
+    def write(self, **entry):
+        if entry["outcome"] == self.fail_on:
+            raise OSError("Simulated audit failure")
+
+        self.entries.append(entry)
+
+
+class TestToolGateway(unittest.IsolatedAsyncioTestCase):
 
     def setUp(self):
-        self.temp_dir = tempfile.TemporaryDirectory()
-        self.path = Path(self.temp_dir.name) / "audit.jsonl"
+        self.tool = FakeTool()
 
-        self.audit = AuditLog(
-            path=self.path,
-            clock=lambda: datetime(2026, 11, 8, tzinfo=timezone.utc)
-        )
-
-    def tearDown(self):
-        self.temp_dir.cleanup()
-
-    def write_entry(self, **overrides):
-        data = {
-            "call_id": "call-123",
-            "tool": "send_email",
-            "principal": "user-1",
-            "risk": "high",
-            "outcome": "allowed",
-            "args": {"to": "test@example.com"},
-            "detail": "Email approved"
+        self.registry = {
+            "fake_tool": ToolSpec(
+                tool=self.tool,
+                risk="low",
+                scopes=frozenset(),
+            )
         }
-        data.update(overrides)
-        self.audit.write(**data)
 
-    # Basic behavior
+        self.rate_limiter = FakeRateLimiter()
+        self.audit = FakeAudit()
 
-    def test_write_and_read_entry(self):
-        self.write_entry()
-
-        entries = self.audit.read()
-
-        self.assertEqual(len(entries), 1)
-        self.assertEqual(entries[0]["tool"], "send_email")
-        self.assertEqual(entries[0]["outcome"], "allowed")
-
-    def test_timestamp_is_utc(self):
-        self.write_entry()
-
-        entry = self.audit.read()[0]
-
-        self.assertTrue(entry["ts"].endswith("+00:00"))
-
-    def test_invalid_outcome_is_rejected(self):
-        with self.assertRaises(ValueError):
-            self.write_entry(outcome="unknown")
-
-    # Redaction
-
-    def test_password_key_is_redacted(self):
-        self.write_entry(
-            args={"password": "my-secret-password"}
+        self.gateway = ToolGateway(
+            registry=self.registry,
+            rate_limiter=self.rate_limiter,
+            audit=self.audit,
         )
 
-        entry = self.audit.read()[0]
+    # ---------------- Basic execution ----------------
 
-        self.assertEqual(
-            entry["args"]["password"],
-            "[REDACTED]"
+    async def test_executes_registered_tool(self):
+        result = await self.gateway.execute(
+            "fake_tool",
+            {"query": "hello"},
+            principal="user-1",
         )
 
-    def test_nested_token_is_redacted(self):
-        self.write_entry(
-            args={
-                "config": {
-                    "api_key": "secret-value"
-                }
-            }
-        )
+        self.assertEqual(result, "success")
+        self.assertEqual(self.tool.calls, 1)
 
-        entry = self.audit.read()[0]
-
-        self.assertEqual(
-            entry["args"]["config"]["api_key"],
-            "[REDACTED]"
-        )
-
-    def test_secret_in_detail_is_redacted(self):
-        self.write_entry(
-            detail="Request failed with Bearer abcdefghijklmnop"
-        )
-
-        entry = self.audit.read()[0]
-
-        self.assertNotIn("abcdefghijklmnop", entry["detail"])
-        self.assertIn("[REDACTED]", entry["detail"])
-
-    # Size limit
-
-    def test_entry_never_exceeds_maximum_size(self):
-        self.write_entry(
-            args={"message": "x" * 100000},
-            detail="large detail " * 1000
-        )
-
-        for line in self.path.read_text(encoding="utf-8").splitlines():
-            self.assertLessEqual(
-                len(line),
-                MAX_ENTRY_CHARS
+    async def test_unregistered_tool_is_denied(self):
+        with self.assertRaises(Denied):
+            await self.gateway.execute(
+                "unknown_tool",
+                {},
+                principal="user-1",
             )
 
-    def test_oversized_entry_is_rejected_before_write(self):
-        # Force a small limit to verify the guard itself.
-        with patch("packages.security.audit.MAX_ENTRY_CHARS", 10):
-            with self.assertRaises(ValueError):
-                self.write_entry()
+        self.assertEqual(self.tool.calls, 0)
+        self.assertEqual(self.audit.entries[-1]["outcome"], "blocked")
 
-        self.assertFalse(self.path.exists())
+    async def test_successful_execution_has_two_audit_events(self):
+        await self.gateway.execute(
+            "fake_tool",
+            {},
+            principal="user-1",
+        )
 
-    # File permissions
+        outcomes = [entry["outcome"] for entry in self.audit.entries]
 
-    @unittest.skipUnless(os.name == "posix", "POSIX permissions only")
-    def test_existing_file_permissions_are_restricted(self):
-        self.path.write_text("", encoding="utf-8")
-        os.chmod(self.path, 0o644)
+        self.assertEqual(outcomes, ["allowed", "ok"])
 
-        self.write_entry()
+        self.assertEqual(
+            self.audit.entries[0]["call_id"],
+            self.audit.entries[1]["call_id"],
+        )
 
-        permissions = self.path.stat().st_mode & 0o777
+    # ---------------- Risk and policy ----------------
 
-        self.assertEqual(permissions, 0o600)
+    async def test_blocked_risk_is_denied(self):
+        self.registry["fake_tool"] = ToolSpec(
+            tool=self.tool,
+            risk="blocked",
+        )
 
-    # Recovery
+        with self.assertRaises(Denied):
+            await self.gateway.execute(
+                "fake_tool",
+                {},
+                principal="user-1",
+            )
 
-    def test_missing_file_returns_empty_list(self):
-        self.assertEqual(self.audit.read(), [])
+        self.assertEqual(self.tool.calls, 0)
+        self.assertEqual(self.audit.entries[-1]["outcome"], "blocked")
 
-    def test_damaged_final_line_is_ignored_in_normal_mode(self):
-        self.write_entry()
+    async def test_high_risk_requires_approval(self):
+        self.registry["fake_tool"] = ToolSpec(
+            tool=self.tool,
+            risk="high",
+        )
 
-        with open(self.path, "a", encoding="utf-8") as f:
-            f.write('{"damaged":')
+        with self.assertRaises(Denied):
+            await self.gateway.execute(
+                "fake_tool",
+                {},
+                principal="user-1",
+            )
 
-        self.assertEqual(len(self.audit.read()), 1)
+        self.assertEqual(self.tool.calls, 0)
 
-    def test_damaged_final_line_raises_in_strict_mode(self):
-        self.write_entry()
+    async def test_approved_high_risk_tool_executes(self):
+        self.registry["fake_tool"] = ToolSpec(
+            tool=self.tool,
+            risk="high",
+        )
 
-        with open(self.path, "a", encoding="utf-8") as f:
-            f.write('{"damaged":')
+        self.gateway.approval_callback = lambda *args: True
 
-        with self.assertRaises(json.JSONDecodeError):
-            self.audit.read(strict=True)
+        result = await self.gateway.execute(
+            "fake_tool",
+            {},
+            principal="user-1",
+        )
 
-    def test_damaged_middle_line_raises(self):
-        self.write_entry()
+        self.assertEqual(result, "success")
+        self.assertEqual(self.tool.calls, 1)
 
-        with open(self.path, "a", encoding="utf-8") as f:
-            f.write('{"damaged":}\n')
-            f.write('{"valid": true}\n')
+    async def test_rejected_approval_prevents_execution(self):
+        self.registry["fake_tool"] = ToolSpec(
+            tool=self.tool,
+            risk="high",
+        )
 
-        with self.assertRaises(json.JSONDecodeError):
-            self.audit.read()
+        self.gateway.approval_callback = lambda *args: False
+
+        with self.assertRaises(Denied):
+            await self.gateway.execute(
+                "fake_tool",
+                {},
+                principal="user-1",
+            )
+
+        self.assertEqual(self.tool.calls, 0)
+
+    async def test_async_approval_callback(self):
+        self.registry["fake_tool"] = ToolSpec(
+            tool=self.tool,
+            risk="high",
+        )
+
+        async def approve(*args):
+            return True
+
+        self.gateway.approval_callback = approve
+
+        await self.gateway.execute(
+            "fake_tool",
+            {},
+            principal="user-1",
+        )
+
+        self.assertEqual(self.tool.calls, 1)
+
+    # ---------------- Scope validation ----------------
+
+    async def test_missing_scope_denies_execution(self):
+        self.registry["fake_tool"] = ToolSpec(
+            tool=self.tool,
+            risk="low",
+            scopes=frozenset({"mail.send"}),
+        )
+
+        with self.assertRaises(Denied):
+            await self.gateway.execute(
+                "fake_tool",
+                {},
+                principal="user-1",
+                granted_scopes={"mail.read"},
+            )
+
+        self.assertEqual(self.tool.calls, 0)
+
+    async def test_granted_scope_allows_execution(self):
+        self.registry["fake_tool"] = ToolSpec(
+            tool=self.tool,
+            risk="low",
+            scopes=frozenset({"mail.send"}),
+        )
+
+        await self.gateway.execute(
+            "fake_tool",
+            {},
+            principal="user-1",
+            granted_scopes={"mail.send"},
+        )
+
+        self.assertEqual(self.tool.calls, 1)
+
+    # ---------------- Rate limiting ----------------
+
+    async def test_rate_limiter_receives_policy_limit(self):
+        await self.gateway.execute(
+            "fake_tool",
+            {},
+            principal="user-1",
+        )
+
+        self.assertEqual(
+            self.rate_limiter.calls,
+            [("user-1", "fake_tool", POLICIES["low"]["rate_per_min"])],
+        )
+
+    async def test_limit_none_skips_rate_limiter(self):
+        with patch.dict(POLICIES["low"], {"rate_per_min": None}):
+            await self.gateway.execute(
+                "fake_tool",
+                {},
+                principal="user-1",
+            )
+
+        self.assertEqual(self.rate_limiter.calls, [])
+
+    async def test_rate_limit_denial_prevents_execution(self):
+        self.rate_limiter.error = Denied("rate limit reached")
+
+        with self.assertRaises(Denied):
+            await self.gateway.execute(
+                "fake_tool",
+                {},
+                principal="user-1",
+            )
+
+        self.assertEqual(self.tool.calls, 0)
+        self.assertEqual(self.audit.entries[-1]["outcome"], "blocked")
+
+    # ---------------- Taint handling ----------------
+
+    async def test_tainted_external_tool_requires_high_risk_approval(self):
+        self.registry["fake_tool"] = ToolSpec(
+            tool=self.tool,
+            risk="low",
+            external=True,
+        )
+
+        self.gateway.approval_callback = lambda *args: True
+
+        await self.gateway.execute(
+            "fake_tool",
+            {},
+            principal="user-1",
+            tainted=True,
+        )
+
+        self.assertEqual(self.audit.entries[0]["risk"], "high")
+
+    async def test_taint_producing_tool_requires_tracker(self):
+        self.registry["fake_tool"] = ToolSpec(
+            tool=self.tool,
+            risk="low",
+            taints=True,
+        )
+
+        with self.assertRaises(Denied):
+            await self.gateway.execute(
+                "fake_tool",
+                {},
+                principal="user-1",
+            )
+
+        self.assertEqual(self.tool.calls, 0)
+
+    async def test_taint_callback_is_called_after_execution(self):
+        self.registry["fake_tool"] = ToolSpec(
+            tool=self.tool,
+            risk="low",
+            taints=True,
+        )
+
+        calls = []
+
+        def mark_tainted(context_id, tool_name):
+            calls.append((context_id, tool_name))
+
+        self.gateway.taint_callback = mark_tainted
+
+        await self.gateway.execute(
+            "fake_tool",
+            {},
+            principal="user-1",
+            context_id="session-123",
+        )
+
+        self.assertEqual(
+            calls,
+            [("session-123", "fake_tool")],
+        )
+
+    # ---------------- Execution errors ----------------
+
+    async def test_tool_error_is_audited_and_propagated(self):
+        self.tool.error = RuntimeError("tool failed")
+
+        with self.assertRaisesRegex(RuntimeError, "tool failed"):
+            await self.gateway.execute(
+                "fake_tool",
+                {},
+                principal="user-1",
+            )
+
+        outcomes = [entry["outcome"] for entry in self.audit.entries]
+
+        self.assertEqual(outcomes, ["allowed", "error"])
+
+    # ---------------- Audit failures ----------------
+
+    async def test_allowed_audit_failure_prevents_execution(self):
+        self.audit.fail_on = "allowed"
+
+        with self.assertRaises(OSError):
+            await self.gateway.execute(
+                "fake_tool",
+                {},
+                principal="user-1",
+            )
+
+        self.assertEqual(self.tool.calls, 0)
+
+    async def test_success_audit_failure_happens_after_execution(self):
+        self.audit.fail_on = "ok"
+
+        with self.assertRaises(OSError):
+            await self.gateway.execute(
+                "fake_tool",
+                {},
+                principal="user-1",
+            )
+
+        # The tool has already executed.
+        self.assertEqual(self.tool.calls, 1)
+
+    # ---------------- Input validation ----------------
+
+    async def test_empty_principal_is_rejected(self):
+        with self.assertRaises(ValueError):
+            await self.gateway.execute(
+                "fake_tool",
+                {},
+                principal="",
+            )
+
+    async def test_string_granted_scopes_are_rejected(self):
+        with self.assertRaises(TypeError):
+            await self.gateway.execute(
+                "fake_tool",
+                {},
+                principal="user-1",
+                granted_scopes="mail.send",
+            )
+
+    async def test_non_boolean_taint_is_rejected(self):
+        with self.assertRaises(TypeError):
+            await self.gateway.execute(
+                "fake_tool",
+                {},
+                principal="user-1",
+                tainted="yes",
+            )
 
 
 if __name__ == "__main__":
