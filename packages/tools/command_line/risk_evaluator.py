@@ -23,11 +23,16 @@ def _build_lookup(mapping: dict) -> dict:
 COMMAND_TIER = _build_lookup(COMMAND_RISK_MAPPING)
 
 
-def get_command_risk(command: str) -> str:
+def get_command_risk(args: dict) -> str:
     """
-    Return the risk level associated with a command.
+    Determine risk based on the selected command.
     Unknown or invalid commands are blocked.
     """
+
+    if not isinstance(args, dict):
+        return "blocked"
+
+    command = args.get("command_name")
 
     if not isinstance(command, str) or not command.strip():
         return "blocked"
