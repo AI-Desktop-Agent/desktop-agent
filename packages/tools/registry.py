@@ -1,4 +1,5 @@
 from packages.security.registry import get_tools
+from .search.web_search import web_search
 
 
 # Explicitly specify tools available to the LLM
