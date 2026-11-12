@@ -1,85 +1,143 @@
 
 import pytest
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
-from packages.llm.llm_manager import LLMManager
-from packages.llm.openrouter_llm import OpenRouterLLM
-from packages.llm.ollama_llm import OllamaLLM
-from packages.llm.hugging_face_llm import HuggingFaceLLM
 from packages.llm.remote_ollama_provider import RemoteOllamaLLM
 
 
-class TestLLMManager:
+class TestRemoteOllamaLLM:
 
     def setup_method(self):
-        self.manager = LLMManager()
+        self.model = "test-model"
+        self.base_url = "http://100.72.240.94:8000/v1"
+        self.api_key = "test-api-key"
+
+    def test_load_configuration_from_environment(self, monkeypatch):
+        monkeypatch.setenv("REMOTE_OLLAMA_MODEL", self.model)
+        monkeypatch.setenv("REMOTE_OLLAMA_BASE_URL", self.base_url)
+        monkeypatch.setenv("REMOTE_OLLAMA_API_KEY", self.api_key)
+
+        llm = RemoteOllamaLLM()
+
+        assert llm.model_name == self.model
+        assert llm.base_url == self.base_url
+        assert llm.api_key == self.api_key
+
+    def test_explicit_configuration_overrides_environment(self, monkeypatch):
+        monkeypatch.setenv("REMOTE_OLLAMA_MODEL", "environment-model")
+        monkeypatch.setenv("REMOTE_OLLAMA_BASE_URL", "http://localhost:8000/v1")
+        monkeypatch.setenv("REMOTE_OLLAMA_API_KEY", "environment-key")
+
+        llm = RemoteOllamaLLM(
+            model_name=self.model,
+            base_url=self.base_url,
+            api_key=self.api_key,
+        )
+
+        assert llm.model_name == self.model
+        assert llm.base_url == self.base_url
+        assert llm.api_key == self.api_key
 
     @pytest.mark.parametrize(
-        "provider, expected_class",
+        "missing_variable, error_message",
         [
-            ("openrouter", OpenRouterLLM),
-            ("ollama", OllamaLLM),
-            ("huggingface", HuggingFaceLLM),
-            ("remote_ollama", RemoteOllamaLLM),
+            ("REMOTE_OLLAMA_MODEL", "REMOTE_OLLAMA_MODEL is not configured"),
+            ("REMOTE_OLLAMA_BASE_URL", "REMOTE_OLLAMA_BASE_URL is not configured"),
+            ("REMOTE_OLLAMA_API_KEY", "REMOTE_OLLAMA_API_KEY is not configured"),
         ],
     )
-    def test_chat_provider_selection(self, monkeypatch, provider, expected_class):
-        monkeypatch.setenv("LLM_PROVIDER", provider)
-        monkeypatch.setenv("HF_MODEL", "test-model")
-        monkeypatch.setenv("HF_API_KEY", "test-key")
+    def test_missing_configuration_raises_error(
+        self, monkeypatch, missing_variable, error_message
+    ):
+        monkeypatch.setenv("REMOTE_OLLAMA_MODEL", self.model)
+        monkeypatch.setenv("REMOTE_OLLAMA_BASE_URL", self.base_url)
+        monkeypatch.setenv("REMOTE_OLLAMA_API_KEY", self.api_key)
 
-        llm = self.manager.get_chat_llm()
+        monkeypatch.delenv(missing_variable)
 
-        assert isinstance(llm, expected_class)
+        llm = RemoteOllamaLLM()
 
-    def test_default_provider_is_openrouter(self, monkeypatch):
-        monkeypatch.delenv("LLM_PROVIDER", raising=False)
+        with pytest.raises(ValueError, match=error_message):
+            llm.initialize_client()
 
-        llm = self.manager.get_chat_llm()
+    @patch("packages.llm.remote_ollama_llm.ChatOpenAI")
+    def test_initialize_client(self, mock_chat_openai):
+        llm = RemoteOllamaLLM(
+            model_name=self.model,
+            base_url=self.base_url,
+            api_key=self.api_key,
+        )
 
-        assert isinstance(llm, OpenRouterLLM)
+        llm.initialize_client()
 
-    def test_provider_selection_is_case_insensitive(self, monkeypatch):
-        monkeypatch.setenv("LLM_PROVIDER", "REMOTE_OLLAMA")
+        mock_chat_openai.assert_called_once_with(
+            model=self.model,
+            api_key=self.api_key,
+            base_url=self.base_url,
+            temperature=0.2,
+            max_retries=2,
+        )
 
-        llm = self.manager.get_chat_llm()
+        assert llm.client is mock_chat_openai.return_value
 
-        assert isinstance(llm, RemoteOllamaLLM)
+    @patch("packages.llm.remote_ollama_llm.ChatOpenAI")
+    def test_invoke(self, mock_chat_openai):
+        expected_response = MagicMock()
+        mock_client = mock_chat_openai.return_value
+        mock_client.invoke.return_value = expected_response
 
-    def test_unknown_provider_raises_error(self, monkeypatch):
-        monkeypatch.setenv("LLM_PROVIDER", "invalid_provider")
+        llm = RemoteOllamaLLM(
+            model_name=self.model,
+            base_url=self.base_url,
+            api_key=self.api_key,
+        )
 
-        with pytest.raises(ValueError, match="Unknown LLM provider"):
-            self.manager.get_chat_llm()
+        response = llm.invoke("Hello")
 
-    def test_chat_llm_is_initialized_lazily(self, monkeypatch):
-        monkeypatch.setenv("LLM_PROVIDER", "remote_ollama")
+        mock_client.invoke.assert_called_once_with("Hello")
+        assert response is expected_response
 
-        assert self.manager.chat_llm is None
+    @patch("packages.llm.remote_ollama_llm.ChatOpenAI")
+    def test_bind_tools(self, mock_chat_openai):
+        tools = [MagicMock(), MagicMock()]
+        bound_client = MagicMock()
 
-        llm = self.manager.get_chat_llm()
+        mock_client = mock_chat_openai.return_value
+        mock_client.bind_tools.return_value = bound_client
 
-        assert llm is not None
-        assert self.manager.chat_llm is llm
+        llm = RemoteOllamaLLM(
+            model_name=self.model,
+            base_url=self.base_url,
+            api_key=self.api_key,
+        )
 
-    def test_chat_llm_is_cached(self, monkeypatch):
-        monkeypatch.setenv("LLM_PROVIDER", "remote_ollama")
+        result = llm.bind_tools(tools)
 
-        first = self.manager.get_chat_llm()
-        second = self.manager.get_chat_llm()
+        mock_client.bind_tools.assert_called_once_with(tools)
+        assert result is bound_client
 
-        assert first is second
+    @patch("packages.llm.remote_ollama_llm.ChatOpenAI")
+    def test_client_is_initialized_only_once(self, mock_chat_openai):
+        llm = RemoteOllamaLLM(
+            model_name=self.model,
+            base_url=self.base_url,
+            api_key=self.api_key,
+        )
 
-    def test_embedding_provider_is_not_configured(self):
-        with pytest.raises(
-            NotImplementedError,
-            match="embedding provider is not configured",
-        ):
-            self.manager.get_embedding_llm()
+        llm.invoke("First message")
+        llm.invoke("Second message")
+        llm.bind_tools([])
 
-    def test_structured_provider_is_not_configured(self):
-        with pytest.raises(
-            NotImplementedError,
-            match="structured provider is not configured",
-        ):
-            self.manager.get_structured_llm()
+        mock_chat_openai.assert_called_once()
+
+    @patch("packages.llm.remote_ollama_llm.ChatOpenAI")
+    def test_bind_tools_before_invoke(self, mock_chat_openai):
+        llm = RemoteOllamaLLM(
+            model_name=self.model,
+            base_url=self.base_url,
+            api_key=self.api_key,
+        )
+
+        llm.bind_tools([])
+
+        mock_chat_openai.assert_called_once()
