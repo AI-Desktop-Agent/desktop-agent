@@ -1,169 +1,85 @@
 
-import asyncio
-import time
+import pytest
+from unittest.mock import patch
 
-from langchain_core.messages import AIMessage
-from langchain_core.tools import tool
-from langgraph.graph import StateGraph, START, END, MessagesState
-from langgraph.prebuilt import ToolNode
-
-from packages.agent_graph.builder import agent_graph
-from packages.tools.search.web_search import web_search
-from packages.core.runtime.agent_runtime import AgentRuntime
-from dotenv import load_dotenv
-
-load_dotenv()
-
-# --------------------------------------------------
-# Test 1: Actual agent graph - async LLM response
-# --------------------------------------------------
-
-async def test_async_agent_response():
-    print("\n[TEST 1] Async agent response")
-
-    result = await agent_graph.ainvoke({
-        "messages": [
-            {"role": "user", "content": "Hello! Introduce yourself briefly."}
-        ]
-    })
-
-    response = result["messages"][-1].content
-
-    assert response, "Agent returned an empty response"
-
-    print("Agent response:", response)
-    print("[PASS] Async agent response")
+from packages.llm.llm_manager import LLMManager
+from packages.llm.openrouter_llm import OpenRouterLLM
+from packages.llm.ollama_llm import OllamaLLM
+from packages.llm.hugging_face_llm import HuggingFaceLLM
+from packages.llm.remote_ollama_provider import RemoteOllamaLLM
 
 
-# --------------------------------------------------
-# Test 2: Actual asynchronous web search tool
-# --------------------------------------------------
+class TestLLMManager:
 
-async def test_async_web_search():
-    print("\n[TEST 2] Async web search")
+    def setup_method(self):
+        self.manager = LLMManager()
 
-    result = await web_search.ainvoke({
-        "query": "Python programming language"
-    })
-
-    assert isinstance(result, str)
-    assert result.strip(), "Web search returned an empty result"
-
-    print("Search result:", result[:300])
-    print("[PASS] Async web search")
-
-
-# --------------------------------------------------
-# Test 3: Parallel execution of multiple tools
-# --------------------------------------------------
-
-@tool
-async def slow_tool(value: int) -> str:
-    """Wait for two seconds and return the supplied value."""
-    await asyncio.sleep(2)
-    return f"Result: {value}"
-
-
-async def test_parallel_tool_execution():
-    print("\n[TEST 3] Parallel tool execution")
-
-    builder = StateGraph(MessagesState)
-
-    builder.add_node("tools", ToolNode([slow_tool]))
-    builder.add_edge(START, "tools")
-    builder.add_edge("tools", END)
-
-    graph = builder.compile()
-
-    message = AIMessage(
-        content="",
-        tool_calls=[
-            {
-                "name": "slow_tool",
-                "args": {"value": 1},
-                "id": "call_1",
-                "type": "tool_call",
-            },
-            {
-                "name": "slow_tool",
-                "args": {"value": 2},
-                "id": "call_2",
-                "type": "tool_call",
-            },
+    @pytest.mark.parametrize(
+        "provider, expected_class",
+        [
+            ("openrouter", OpenRouterLLM),
+            ("ollama", OllamaLLM),
+            ("huggingface", HuggingFaceLLM),
+            ("remote_ollama", RemoteOllamaLLM),
         ],
     )
+    def test_chat_provider_selection(self, monkeypatch, provider, expected_class):
+        monkeypatch.setenv("LLM_PROVIDER", provider)
+        monkeypatch.setenv("HF_MODEL", "test-model")
+        monkeypatch.setenv("HF_API_KEY", "test-key")
 
-    start = time.perf_counter()
+        llm = self.manager.get_chat_llm()
 
-    result = await graph.ainvoke({
-        "messages": [message]
-    })
+        assert isinstance(llm, expected_class)
 
-    elapsed = time.perf_counter() - start
+    def test_default_provider_is_openrouter(self, monkeypatch):
+        monkeypatch.delenv("LLM_PROVIDER", raising=False)
 
-    tool_results = result["messages"][1:]
+        llm = self.manager.get_chat_llm()
 
-    assert len(tool_results) == 2
-    assert elapsed < 3.5, (
-        f"Expected parallel execution, but took {elapsed:.2f} seconds"
-    )
+        assert isinstance(llm, OpenRouterLLM)
 
-    print("Tool results:", [msg.content for msg in tool_results])
-    print(f"Execution time: {elapsed:.2f} seconds")
-    print("[PASS] Parallel tool execution")
+    def test_provider_selection_is_case_insensitive(self, monkeypatch):
+        monkeypatch.setenv("LLM_PROVIDER", "REMOTE_OLLAMA")
 
+        llm = self.manager.get_chat_llm()
 
-# --------------------------------------------------
-# Test 4: Runtime async bridge
-# --------------------------------------------------
+        assert isinstance(llm, RemoteOllamaLLM)
 
-async def test_runtime_async_execution():
-    print("\n[TEST 4] Runtime async execution")
+    def test_unknown_provider_raises_error(self, monkeypatch):
+        monkeypatch.setenv("LLM_PROVIDER", "invalid_provider")
 
-    runtime = AgentRuntime(
-        graph=agent_graph,
-        stt=None,
-        recorder=None,
-        tts=None,
-    )
+        with pytest.raises(ValueError, match="Unknown LLM provider"):
+            self.manager.get_chat_llm()
 
-    response = await runtime._process_text_async(
-        "What is Python? Answer in one sentence."
-    )
+    def test_chat_llm_is_initialized_lazily(self, monkeypatch):
+        monkeypatch.setenv("LLM_PROVIDER", "remote_ollama")
 
-    assert isinstance(response, str)
-    assert response.strip()
+        assert self.manager.chat_llm is None
 
-    print("Runtime response:", response)
-    print("[PASS] Runtime async execution")
+        llm = self.manager.get_chat_llm()
 
-# --------------------------------------------------
-# Test runner
-# --------------------------------------------------
+        assert llm is not None
+        assert self.manager.chat_llm is llm
 
-async def run_async_tests():
-    await test_async_agent_response()
-    await test_async_web_search()
-    await test_parallel_tool_execution()
-    await test_runtime_async_execution()
+    def test_chat_llm_is_cached(self, monkeypatch):
+        monkeypatch.setenv("LLM_PROVIDER", "remote_ollama")
 
-def main():
-    try:
-        asyncio.run(run_async_tests())
+        first = self.manager.get_chat_llm()
+        second = self.manager.get_chat_llm()
 
-        # Runtime bridge uses asyncio.run internally.
-        # Therefore, call it outside the running event loop.
-        # test_runtime_async_bridge()
+        assert first is second
 
-        print("\n================================")
-        print("ALL ASYNC TESTS PASSED")
-        print("================================")
+    def test_embedding_provider_is_not_configured(self):
+        with pytest.raises(
+            NotImplementedError,
+            match="embedding provider is not configured",
+        ):
+            self.manager.get_embedding_llm()
 
-    except Exception as exc:
-        print("\n[FAILED]", repr(exc))
-        raise
-
-
-if __name__ == "__main__":
-    main()
-    
+    def test_structured_provider_is_not_configured(self):
+        with pytest.raises(
+            NotImplementedError,
+            match="structured provider is not configured",
+        ):
+            self.manager.get_structured_llm()
