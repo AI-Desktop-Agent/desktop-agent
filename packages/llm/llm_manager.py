@@ -44,46 +44,46 @@ class LLMManager:
 
         elif model_type == 'embedding':
             if embedd_provider == "openrouter":
-                self.chat_llm = OpenRouterLLM(
+                self.embedding_llm = OpenRouterLLM(
                     model_name=os.getenv("OPENROUTER_EMBEDD_MODEL", "openrouter/free")
                 )
 
             elif embedd_provider == "ollama":
-                self.chat_llm = OllamaLLM(
+                self.embedding_llm = OllamaLLM(
                     model_name=os.getenv("OLLAMA_EMBEDD_MODEL", "llama3.2")
                 )
 
             elif embedd_provider == "huggingface":
-                self.chat_llm = HuggingFaceLLM(
+                self.embedding_llm = HuggingFaceLLM(
                     model_name=os.getenv("HF_MODEL"),
                     api_key=os.getenv("HF_API_KEY")
                 )
 
             elif embedd_provider == "remote_ollama":
-                self.chat_llm = RemoteOllamaLLM()
+                self.embedding_llm = RemoteOllamaLLM()
 
             else:
                 raise ValueError(f"Unknown LLM provider: {embedd_provider}")
             
         else:
             if struct_provider == "openrouter":
-                self.chat_llm = OpenRouterLLM(
+                self.structured_llm = OpenRouterLLM(
                     model_name=os.getenv("OPENROUTER_STRUCT_MODEL", "openrouter/free")
                 )
 
             elif struct_provider == "ollama":
-                self.chat_llm = OllamaLLM(
+                self.structured_llm = OllamaLLM(
                     model_name=os.getenv("OLLAMA_STRUCT_MODEL", "llama3.2")
                 )
 
             elif struct_provider == "huggingface":
-                self.chat_llm = HuggingFaceLLM(
+                self.structured_llm = HuggingFaceLLM(
                     model_name=os.getenv("HF_MODEL"),
                     api_key=os.getenv("HF_API_KEY")
                 )
 
             elif struct_provider == "remote_ollama":
-                self.chat_llm = RemoteOllamaLLM()
+                self.structured_llm = RemoteOllamaLLM()
 
             else:
                 raise ValueError(f"Unknown LLM provider: {struct_provider}")

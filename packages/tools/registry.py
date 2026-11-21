@@ -1,10 +1,12 @@
 from packages.security.registry import get_tools
 from .search.web_search import web_search
+from .command_line.command_executor_tool import command_executor_tool
 
 
 # Explicitly specify tools available to the LLM
 AVAILABLE_TOOLS_NAMES = {
     "web_search",
+    "command_executor_tool"
 }
 
 
