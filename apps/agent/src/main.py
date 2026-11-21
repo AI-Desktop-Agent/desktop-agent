@@ -1,6 +1,10 @@
 from dotenv import load_dotenv
+from packages.tools.command_line.executor import CommandExecutor
 
 load_dotenv()
+CommandExecutor.configure([
+    r"C:\Users\Manpreet Singh\OneDrive\Desktop\desktop agent test dir"
+])
 
 from packages.core.runtime.agent_runtime import AgentRuntime
 from packages.agent_graph.builder import agent_graph
