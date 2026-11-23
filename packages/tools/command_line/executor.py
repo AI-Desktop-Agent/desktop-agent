@@ -197,6 +197,7 @@ class CommandExecutor:
                 "CHDIR": cls._cd,
                 "TREE": cls._tree,
                 "VER": cls._version,
+                "HELP": cls._help,
             }
 
             handler = handlers.get(command_name)
@@ -371,6 +372,65 @@ class CommandExecutor:
             raise CommandRejected("VER is only supported on Windows.")
 
         return f"Windows version: {platform.version()}"
+
+    @staticmethod
+    def _help(arguments: list[str]) -> str:
+        """Return descriptions for the executor's allowed commands."""
+        if len(arguments) > 1:
+            raise CommandRejected("HELP accepts at most one command name.")
+
+        from packages.tools.command_line.command_registry import (
+            COMMAND_RISK_MAPPING,
+        )
+
+        descriptions = {
+            "BREAK": "Sets or clears extended CTRL+C checking.",
+            "CD": "Displays the configured allowed folder.",
+            "CHDIR": "Displays the configured allowed folder.",
+            "DIR": "Lists files and directories.",
+            "DRIVERQUERY": "Displays installed device drivers.",
+            "HELP": "Lists supported commands or describes one command.",
+            "SYSTEMINFO": "Displays Windows system information.",
+            "TASKLIST": "Displays running processes.",
+            "TREE": "Displays a bounded directory tree.",
+            "VER": "Displays the Windows version.",
+        }
+
+        commands = [
+            command
+            for risk, names in COMMAND_RISK_MAPPING.items()
+            if risk != "blocked"
+            for command in names
+        ]
+
+        if arguments:
+            command_name = arguments[0].strip().upper()
+
+            if not re.fullmatch(r"[A-Z][A-Z0-9]*", command_name):
+                raise CommandRejected("Invalid command name.")
+
+            if command_name not in commands:
+                raise CommandRejected(
+                    f"Command '{command_name}' is not supported."
+                )
+
+            description = descriptions.get(command_name)
+            if description is None:
+                raise CommandRejected(
+                    f"No description is available for '{command_name}'."
+                )
+
+            return f"{command_name}: {description}"
+
+        lines = ["Supported commands:"]
+        for command in commands:
+            description = descriptions.get(command)
+            if description:
+                lines.append(f"{command}: {description}")
+            else:
+                lines.append(command)
+
+        return "\n".join(lines)
 
     # -----------------------------------------------------
     # Directory reading helpers

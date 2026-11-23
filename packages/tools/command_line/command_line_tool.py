@@ -41,10 +41,12 @@ def get_available_command_descriptions() -> str:
             check=False,
         )
 
-        if result.returncode != 0:
-            raise RuntimeError("Windows HELP command failed.")
-
         help_output = result.stdout
+
+        if not help_output or not help_output.strip():
+            raise RuntimeError(
+                "Windows HELP returned no command descriptions."
+            )
 
         registered_commands = {
             command.upper().strip()
