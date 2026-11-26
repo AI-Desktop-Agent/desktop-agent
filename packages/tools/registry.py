@@ -1,12 +1,14 @@
 from packages.security.registry import get_tools
 from .search.web_search import web_search
 from .applications.application_tool import open_application
+from .clarification_tool import ask_clarification
 
 
 # Explicitly specify tools available to the LLM
 AVAILABLE_TOOLS_NAMES = {
     "web_search",
-    "open_application"
+    "open_application",
+    "ask_clarification",
 }
 
 

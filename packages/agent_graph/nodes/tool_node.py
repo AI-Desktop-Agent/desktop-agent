@@ -1,6 +1,7 @@
 
 from langchain_core.messages import ToolMessage
 from langchain_core.runnables import RunnableConfig
+from langgraph.errors import GraphBubbleUp
 
 from packages.agent_graph.state import AgentState
 from packages.security.gateway import gateway
@@ -43,6 +44,9 @@ async def secure_tool_node(
             )
 
             content = str(result)
+
+        except GraphBubbleUp:
+            raise
 
         except Denied as exc:
             content = f"Tool blocked by security policy: {exc}"

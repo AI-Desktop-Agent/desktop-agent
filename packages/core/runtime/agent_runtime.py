@@ -1,24 +1,41 @@
 
 import asyncio
+import uuid
+from collections.abc import Mapping, Sequence
+
+from langchain_core.messages import HumanMessage, RemoveMessage
+from langgraph.types import Command
 
 from packages.audio.recording.microphone_recorder import MicrophoneRecorder
+from packages.core.interfaces.human_interaction import HumanInteraction
+from packages.core.runtime.console_human_interaction import (
+    ConsoleHumanInteraction,
+)
 from packages.core.interfaces.speech_to_text_provider import SpeechToTextProvider
 from packages.core.interfaces.text_to_speech_provider import TextToSpeechProvider
 
 
 class AgentRuntime:
+    MAX_HISTORY_TURNS = 20
 
     def __init__(
         self,
         graph,
         stt: SpeechToTextProvider,
         recorder: MicrophoneRecorder,
-        tts: TextToSpeechProvider
+        tts: TextToSpeechProvider,
+        human_interaction: HumanInteraction | None = None,
     ):
         self.graph = graph
         self.stt = stt
         self.recorder = recorder
         self.tts = tts
+        self.human_interaction = (
+            human_interaction
+            if human_interaction is not None
+            else ConsoleHumanInteraction()
+        )
+        self._thread_id = str(uuid.uuid4())
 
     def run(self):
         print("[Agent] Started. Press Ctrl+C to stop.")
@@ -57,13 +74,82 @@ class AgentRuntime:
                 print(f"[Agent] Request failed: {exc}")
 
     async def _process_text_async(self, text: str) -> str:
-        result = await self.graph.ainvoke({
-            "messages": [
-                {"role": "user", "content": text}
+        config = {
+            "configurable": {
+                "thread_id": self._thread_id,
+                "user_id": "local-user",
+            }
+        }
+        snapshot = await self.graph.aget_state(config)
+        messages = snapshot.values.get("messages", [])
+
+        human_message_indices = [
+            index
+            for index, message in enumerate(messages)
+            if isinstance(message, HumanMessage)
+        ]
+        updates = []
+        if len(human_message_indices) >= self.MAX_HISTORY_TURNS:
+            first_retained_message = human_message_indices[
+                -(self.MAX_HISTORY_TURNS - 1)
             ]
-        })
+            updates.extend(
+                RemoveMessage(id=message.id)
+                for message in messages[:first_retained_message]
+                if message.id is not None
+            )
+
+        updates.append(HumanMessage(content=text))
+        result = await self.graph.ainvoke(
+            {"messages": updates},
+            config=config,
+        )
+
+        while result.get("__interrupt__"):
+            interruptions = result["__interrupt__"]
+            if len(interruptions) != 1:
+                raise RuntimeError(
+                    "The agent runtime supports one human interaction at a time."
+                )
+
+            resume_value = await self._resolve_human_interaction(
+                interruptions[0].value
+            )
+            result = await self.graph.ainvoke(
+                Command(resume=resume_value),
+                config=config,
+            )
 
         return result["messages"][-1].content
+
+    async def _resolve_human_interaction(self, request: object) -> str | bool:
+        if not isinstance(request, Mapping):
+            raise TypeError("Graph interrupt payload must be a mapping.")
+
+        kind = request.get("kind")
+        prompt = request.get("prompt")
+        options = request.get("options", [])
+
+        if kind not in {"clarification", "approval"}:
+            raise ValueError("Graph interrupt has an unsupported interaction kind.")
+        if not isinstance(prompt, str) or not prompt.strip():
+            raise ValueError("Graph interrupt must include a prompt.")
+        if (
+            not isinstance(options, Sequence)
+            or isinstance(options, (str, bytes))
+            or any(not isinstance(option, str) for option in options)
+        ):
+            raise ValueError("Graph interrupt options must be a list of strings.")
+
+        answer = await self.human_interaction.ask_clarification(
+            prompt,
+            options,
+        )
+
+        if kind == "approval":
+            return answer.strip().casefold() == "approve"
+
+        return answer
 
     def _record_audio(self):
         return self.recorder.record()

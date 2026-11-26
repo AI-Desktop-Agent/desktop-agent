@@ -6,6 +6,8 @@ import inspect
 import uuid
 from collections.abc import Mapping
 
+from langgraph.errors import GraphBubbleUp
+
 from packages.security.policy import Denied, POLICIES, resolve_risk
 from packages.security.registry import REGISTRY
 from packages.security.limits import limiter
@@ -26,8 +28,16 @@ class ToolGateway:
         self.registry = registry if registry is not None else REGISTRY
         self.rate_limiter = rate_limiter if rate_limiter is not None else limiter
         self.audit = audit if audit is not None else audit_log
-        self.approval_callback = approval_callback
+        self._approval_callback = None
+        self.set_approval_callback(approval_callback)
         self.taint_callback = taint_callback
+
+    def set_approval_callback(self, callback):
+        """Configure the trusted human approval handler used by this gateway."""
+        if callback is not None and not callable(callback):
+            raise TypeError("approval_callback must be callable or None")
+
+        self._approval_callback = callback
 
     async def _invoke_tool(self, tool, args):
         """Support both async and sync tools without blocking the event loop."""
@@ -53,11 +63,11 @@ class ToolGateway:
     async def _request_approval(self, tool_name, risk, args, principal):
         """Request approval when the effective risk policy requires it."""
 
-        if self.approval_callback is None:
+        if self._approval_callback is None:
             raise Denied("user approval is not configured")
 
         try:
-            result = self.approval_callback(
+            result = self._approval_callback(
                 tool_name,
                 risk,
                 dict(args),
@@ -66,6 +76,9 @@ class ToolGateway:
 
             if inspect.isawaitable(result):
                 result = await result
+
+        except GraphBubbleUp:
+            raise
 
         except Exception as exc:
             raise Denied("approval check failed") from exc
@@ -236,6 +249,9 @@ class ToolGateway:
                     context_id if context_id is not None else principal
                 )
                 await self._mark_tainted(trusted_context, tool_name)
+
+        except GraphBubbleUp:
+            raise
 
         except Exception as exc:
             # The tool may have performed a side effect before failing.
