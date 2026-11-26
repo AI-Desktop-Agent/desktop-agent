@@ -37,6 +37,18 @@ class ApplicationLauncher:
         )
 
     @classmethod
+    def is_available(cls, spec: ApplicationSpec) -> bool:
+        if os.name != "nt":
+            return False
+
+        for raw_path in spec.executable_paths:
+            executable = cls._expand_executable_path(raw_path)
+            if executable.is_file():
+                return True
+
+        return False
+
+    @classmethod
     def _validate_arguments(
         cls,
         spec: ApplicationSpec,
@@ -53,7 +65,7 @@ class ApplicationLauncher:
                 f"Arguments are not allowed for application '{spec.name}'."
             )
 
-        if spec.name != "chrome" or len(arguments) != 1:
+        if spec.name not in {"chrome", "edge"} or len(arguments) != 1:
             raise ApplicationLaunchError(
                 f"Only one URL argument is supported for '{spec.name}'."
             )
@@ -95,7 +107,7 @@ class ApplicationLauncher:
                 or argument.startswith("-")
             ):
                 raise ApplicationLaunchError(
-                    "Chrome accepts only a valid HTTP or HTTPS URL."
+                    f"{spec.name} accepts only a valid HTTP or HTTPS URL."
                 )
 
             validated_arguments.append(argument)

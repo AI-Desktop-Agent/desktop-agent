@@ -9,6 +9,8 @@ class ApplicationSpec:
     risk: str
     arguments_allowed: bool = False
     aliases: tuple[str, ...] = ()
+    category: str | None = None
+    category_aliases: tuple[str, ...] = ()
 
 
 APPLICATIONS: dict[str, ApplicationSpec] = {
@@ -18,6 +20,9 @@ APPLICATIONS: dict[str, ApplicationSpec] = {
             r"C:\Windows\System32\notepad.exe",
         ),
         risk="low",
+        aliases=("text editor",),
+        category="text editor",
+        category_aliases=("text editor", "plain text editor"),
     ),
     "calculator": ApplicationSpec(
         name="calculator",
@@ -27,6 +32,8 @@ APPLICATIONS: dict[str, ApplicationSpec] = {
         ),
         risk="low",
         aliases=("calc",),
+        category="calculator",
+        category_aliases=("calculator", "calculation app"),
     ),
     "chrome": ApplicationSpec(
         name="chrome",
@@ -38,6 +45,21 @@ APPLICATIONS: dict[str, ApplicationSpec] = {
         risk="medium",
         arguments_allowed=True,
         aliases=("google chrome", "google-chrome"),
+        category="browser",
+        category_aliases=("browser", "web browser"),
+    ),
+    "edge": ApplicationSpec(
+        name="edge",
+        executable_paths=(
+            r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
+            r"C:\Program Files\Microsoft\Edge\Application\msedge.exe",
+            r"%PROGRAMFILES%\Microsoft\Edge\Application\msedge.exe",
+        ),
+        risk="medium",
+        arguments_allowed=True,
+        aliases=("microsoft edge", "ms edge"),
+        category="browser",
+        category_aliases=("browser", "web browser"),
     ),
     "vscode": ApplicationSpec(
         name="vscode",
@@ -47,6 +69,8 @@ APPLICATIONS: dict[str, ApplicationSpec] = {
         ),
         risk="medium",
         aliases=("visual studio code", "code"),
+        category="code editor",
+        category_aliases=("code editor", "programming editor", "ide"),
     ),
     "explorer": ApplicationSpec(
         name="explorer",
@@ -55,6 +79,8 @@ APPLICATIONS: dict[str, ApplicationSpec] = {
         ),
         risk="medium",
         aliases=("file explorer", "windows explorer"),
+        category="file manager",
+        category_aliases=("file manager", "file explorer"),
     ),
 }
 
@@ -87,13 +113,73 @@ def get_application_spec(application: str) -> ApplicationSpec | None:
     return None
 
 
+def normalize_application_category(category: str) -> str:
+    if not isinstance(category, str):
+        return ""
+
+    return " ".join(
+        category.strip()
+        .lower()
+        .replace("_", " ")
+        .replace("-", " ")
+        .split()
+    )
+
+
+def get_category_application_names(category: str) -> tuple[str, ...]:
+    normalized_category = normalize_application_category(category)
+
+    if not normalized_category:
+        return ()
+
+    matches = []
+
+    for candidate in APPLICATIONS.values():
+        category_names = {normalize_application_category(candidate.category or "")}
+        category_names.update(
+            normalize_application_category(category_alias)
+            for category_alias in candidate.category_aliases
+        )
+
+        if normalized_category in category_names:
+            matches.append(candidate.name)
+
+    return tuple(sorted(set(matches)))
+
+
+def get_category_application_specs(category: str) -> tuple[ApplicationSpec, ...]:
+    names = get_category_application_names(category)
+    return tuple(
+        APPLICATIONS[name]
+        for name in names
+        if name in APPLICATIONS
+    )
+
+
+def resolve_application_or_category(
+    application: str,
+) -> tuple[ApplicationSpec | None, tuple[str, ...]]:
+    spec = get_application_spec(application)
+    if spec is not None:
+        return spec, ()
+
+    return None, get_category_application_names(application)
+
+
 def get_application_risk(args: dict) -> str:
     if not isinstance(args, dict):
         return "blocked"
 
-    spec = get_application_spec(args.get("application"))
+    application = args.get("application")
+    spec = get_application_spec(application)
 
     if spec is None:
+        category_names = get_category_application_names(application)
+        if category_names:
+            arguments = args.get("arguments", [])
+            if arguments:
+                return "high"
+            return "medium"
         return "blocked"
 
     if spec.risk not in {"low", "medium", "high", "destructive", "blocked"}:
