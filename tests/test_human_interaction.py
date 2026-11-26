@@ -29,12 +29,11 @@ class FakeBoundChatModel:
                     content="",
                     tool_calls=[
                         {
-                            "name": "ask_clarification",
+                            "name": "open_application",
                             "args": {
-                                "question": "Which browser should I open?",
-                                "options": ["Chrome", "Edge"],
+                                "application": "browser",
                             },
-                            "id": "clarification-1",
+                            "id": "application-category-1",
                             "type": "tool_call",
                         }
                     ],
@@ -80,18 +79,37 @@ class FakeChatModel:
 
 
 class TestConsoleHumanInteraction(IsolatedAsyncioTestCase):
-    async def test_langraph_clarification_interrupt_and_resume(self):
+    async def test_langraph_browser_category_interrupt_and_resume(self):
         config = {
             "configurable": {
-                "thread_id": "hitl-clarification-test",
+                "thread_id": "browser-category-test",
                 "user_id": "local-user",
             }
         }
+        launch_result = {
+            "success": True,
+            "status": "launched",
+            "application": "chrome",
+            "executable": "C:\\Program Files\\Google\\Chrome\\chrome.exe",
+            "pid": 1234,
+        }
 
-        with patch.object(
-            llm_manager,
-            "get_chat_llm",
-            return_value=FakeChatModel(),
+        with (
+            patch.object(
+                llm_manager,
+                "get_chat_llm",
+                return_value=FakeChatModel(),
+            ),
+            patch(
+                "packages.tools.applications.application_launcher."
+                "ApplicationLauncher.is_available",
+                return_value=True,
+            ),
+            patch(
+                "packages.tools.applications.application_launcher."
+                "ApplicationLauncher.launch",
+                return_value=launch_result,
+            ) as launch,
         ):
             paused = await agent_graph.ainvoke(
                 {"messages": [HumanMessage(content="Open browser")]},
@@ -105,20 +123,24 @@ class TestConsoleHumanInteraction(IsolatedAsyncioTestCase):
             self.assertEqual(payload["kind"], "clarification")
             self.assertEqual(
                 payload["prompt"],
-                "Which browser should I open?",
+                "Which browser application should I open?",
             )
-            self.assertEqual(payload["options"], ["Chrome", "Edge"])
+            self.assertEqual(payload["options"], ["chrome", "edge"])
 
             resumed = await agent_graph.ainvoke(
                 Command(resume="Chrome"),
                 config=config,
             )
 
+        launch.assert_called_once_with(
+            application="chrome",
+            arguments=None,
+        )
         final_message = resumed["messages"][-1]
         self.assertIsInstance(final_message, AIMessage)
         self.assertEqual(
             final_message.content,
-            "The browser choice is confirmed.",
+            "The application launch was approved.",
         )
 
     async def test_langgraph_high_risk_approval_denies_launch(self):
