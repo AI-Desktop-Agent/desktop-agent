@@ -1,57 +1,161 @@
+Desktop Agent - Target Architecture
+===================================
+
+The supervisor is the existing LangGraph response node. It selects whether to
+answer the user directly, call a regular tool, or delegate to a subagent exposed
+as a tool. A delegation tool invokes its subagent and returns the result to the
+supervisor.
+
+Request flow
+------------
+
+User (voice or text)
+    |
+    v
+AgentRuntime
+    |
+    v
+Supervisor graph
+    |
+    +-- response_node: decide, answer, or request a tool call
+    |
+    +-- tool_node -> Security gateway -> regular tool
+    |                                  -> subagent delegation tool
+    |                                         |
+    |                                         v
+    |                                    Subagent workflow
+    |                                         |
+    |                                    secured agent tools
+    |
+    +<---------------- result returned to response_node
+    |
+    v
+Final response (printed and spoken)
+
+Target project structure
+------------------------
 
 desktop-agent/
-│
-├── apps/
-│   └── agent/
-│       └── src/
-│           └── main.py                  # Entry point
-│
-├── packages/
-│   │
-│   ├── agent_graph/                     # NEW
-│   │   ├── __init__.py
-│   │   ├── builder.py                   # Create and compile graph
-│   │   ├── state.py                     # Shared graph state
-│   │   ├── nodes/
-│   │   │   ├── __init__.py
-│   │   │   ├── agent.py                 # Call LLM
-│   │   │   └── tools.py                 # Execute requested tools
-│   │   └── edges/
-│   │       ├── __init__.py
-│   │       └── routing.py               # Tool or final response?
-│   │
-│   ├── core/
-│   │   ├── interfaces/
-│   │   │   ├── wake_word_provider.py
-│   │   │   └── speech_to_text_provider.py
-│   │   └── runtime/                     # NEW
-│   │       ├── __init__.py
-│   │       └── agent_runtime.py         # Connect STT and graph
-│   │
-│   ├── audio/                           # Existing
-│   │   ├── recording/
-│   │   └── wakeword/
-│   │
-│   ├── speech/                          # Existing
-│   │   └── faster_whisper_stt.py
-│   │
-│   ├── llm/                             # Existing
-│   │   ├── llm_provider.py
-│   │   ├── llm_manager.py
-│   │   ├── ollama_llm.py
-│   │   └── hugging_face_llm.py
-│   │
-│   ├── tools/                           # NEW, initially minimal
-│   │   ├── __init__.py
-│   │   └── registry.py
-│   │
-│   ├── memory/                          # Add when needed
-│   └── security/                        # Add before sensitive tools
-│
-├── tests/
-│   ├── test_graph.py                    # NEW
-│   └── test_graph_routing.py            # NEW
-│
-├── requirements.txt
-├── architecture.txt
-└── README.md
+|
++-- apps/
+|   +-- agent/
+|       +-- src/
+|           +-- main.py                   # Composition root; starts the runtime
+|
++-- packages/
+|   +-- core/
+|   |   +-- interfaces/
+|   |   |   +-- human_interaction.py
+|   |   |   +-- speech_to_text_provider.py
+|   |   |   +-- text_to_speech_provider.py
+|   |   |   +-- wake_word_provider.py
+|   |   +-- runtime/
+|   |       +-- agent_runtime.py          # Voice loop; invokes supervisor graph
+|   |       +-- console_human_interaction.py
+|   |
+|   +-- agent_graph/                      # Supervisor workflow
+|   |   +-- builder.py
+|   |   +-- state.py
+|   |   +-- nodes/
+|   |   |   +-- response_node.py          # Selects tools/subagents or responds
+|   |   |   +-- tool_node.py              # Dispatches calls through gateway
+|   |   +-- prompts/
+|   |       +-- response_prompt.py
+|   |
+|   +-- agents/                           # Subagent implementations
+|   |   +-- base.py                       # Shared subagent contract/context
+|   |   +-- computer_use/
+|   |   |   +-- agent.py                  # Handles delegated computer-use tasks
+|   |   |   +-- prompt.py                 # Computer-use agent instructions
+|   |   |   +-- graph.py                  # Optional workflow for complex tasks
+|   |   |   +-- tools.py                  # Agent actions; secured individually
+|   |   +-- ...                           # Future specialized agents
+|   |
+|   +-- tools/
+|   |   +-- registry.py                   # Selects tools visible to supervisor
+|   |   +-- delegation/
+|   |   |   +-- computer_use.py            # Described tool invoking that subagent
+|   |   +-- search/
+|   |   +-- applications/
+|   |   +-- command_line/
+|   |
+|   +-- memory/                           # Long-term memory service
+|   |   +-- service.py                    # Read, search, add, update, forget
+|   |   +-- models.py                     # Memory records and scope metadata
+|   |   +-- policies.py                   # Memory access and write rules
+|   |   +-- stores/
+|   |       +-- ...                       # Pluggable storage backend
+|   |
+|   +-- security/
+|   |   +-- gateway.py                    # Authorizes and executes tools
+|   |   +-- registry.py                   # Tool identities, scopes, and risks
+|   |   +-- policy.py
+|   |   +-- audit.py
+|   |   +-- limits.py
+|   |   +-- taint.py
+|   |
+|   +-- audio/
+|   |   +-- recording/
+|   |   +-- wakeword/
+|   +-- speech/
+|   +-- llm/
+|
++-- tests/
++-- requirements.txt
++-- architecture.txt
++-- README.md
+
+Responsibilities and boundaries
+-------------------------------
+
+1. AgentRuntime handles microphone capture, transcription, graph invocation,
+   speech output, and human interaction. It does not choose individual tools.
+
+2. The response_node is the supervisor. It sees regular tools and delegation
+   tools, with descriptions that explain when each should be used. It decides
+   whether to answer or delegate; it does not perform a subagent's work itself.
+
+3. Each delegation tool is the supervisor-facing interface for one subagent.
+   Its implementation invokes that subagent and returns a result. Keep this
+   wrapper small; a subagent can start as a function and gain its own graph
+   only when its workflow needs one.
+
+4. A subagent owns its instructions, task logic, and specialized tools. For
+   example, the computer-use agent handles the details of desktop interaction.
+   Its low-level actions must also pass through the security gateway; authorizing
+   the delegation call alone does not authorize every action it performs.
+
+5. The tools registry controls which tools the supervisor can request. The
+   security registry and gateway control which registered tools can execute,
+   including subagent tools, with scopes, risk policies, approvals, rate limits,
+   taint tracking, and audit logging as applicable. Tool descriptions guide
+   routing; they are not security controls.
+
+Long-term memory
+----------------
+
+Memory is a service available to the supervisor and, where needed, selected
+subagents. It is not an unrestricted shared context automatically given to
+every agent.
+
+Use scopes to separate:
+
+- Shared user memory: stable preferences and facts useful across agents.
+- Agent-specific memory: specialized knowledge owned by one agent, such as
+  computer-use conventions.
+- Task/conversation memory: temporary context for an active request or
+  delegation, separate from long-term memory.
+
+Memory records should include ownership/scope and provenance metadata. Enforce
+read and write permissions in the memory service, so an agent can only retrieve
+or change memories allowed for its task. The supervisor may pass relevant
+context to a subagent rather than granting that subagent broad memory access.
+
+Current implementation notes
+----------------------------
+
+The current project already has AgentRuntime, the LangGraph response and tool
+nodes, a supervisor-visible tool list, and a central security gateway. The
+agents/ and memory/ directories above describe the target design; they are
+planned additions, not a claim that those components are already implemented.
+Wake-word detection exists but is not part of the default runtime loop.
